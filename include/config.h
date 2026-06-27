@@ -39,3 +39,19 @@
 #define TFT_DC_PIN   32   // EYESPI DC   (clean GPIO)
 #define TFT_RST_PIN  27   // EYESPI RST  (clean GPIO)
 #define TFT_LITE_PIN 14   // EYESPI Lite — backlight, LEDC PWM for dimming
+
+// =====================================================================
+// Runtime-settings defaults. These seed the NVS-backed Settings store on
+// first boot (see settings.h); thereafter the saved values win and are
+// editable from the config web UI. Pins/addresses above stay compile-time.
+// =====================================================================
+#define DEFAULT_ROTATION    0     // 0..3 — finalize once enclosure mount is set
+#define DEFAULT_BRIGHTNESS  200   // 0..255 backlight PWM duty
+#define DEFAULT_TEMP_UNIT_F true  // show degF (vs degC)
+
+#define AQ_GOOD_PPM   800    // <= GOOD ; <= FAIR ; <= POOR ; else BAD
+#define AQ_FAIR_PPM   1200
+#define AQ_POOR_PPM   1500
+
+#define DEFAULT_TZ        "UTC0"        // POSIX TZ string; set real zone in UI
+#define DEFAULT_HOSTNAME  "office-co2"  // mDNS / AP name base

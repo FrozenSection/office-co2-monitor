@@ -14,6 +14,7 @@
 
 #include "config.h"
 #include "version.h"
+#include "settings.h"
 
 static Adafruit_GC9A01A tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
 static SensirionI2cScd4x scd4x;
@@ -51,9 +52,9 @@ static void logScdError(const char* ctx, int16_t err) {
 // Air-quality tier -> color + short label. Logic only; palette is provisional
 // (designer will refine, and the amber/amber collision is a known TODO).
 static uint16_t co2Color(uint16_t co2, const char** label) {
-  if (co2 <= 800)  { *label = "GOOD"; return GC9A01A_GREEN; }
-  if (co2 <= 1200) { *label = "FAIR"; return GC9A01A_YELLOW; }
-  if (co2 <= 1500) { *label = "POOR"; return tft.color565(255, 140, 0); }
+  if (co2 <= settings::cfg.aqGood) { *label = "GOOD"; return GC9A01A_GREEN; }
+  if (co2 <= settings::cfg.aqFair) { *label = "FAIR"; return GC9A01A_YELLOW; }
+  if (co2 <= settings::cfg.aqPoor) { *label = "POOR"; return tft.color565(255, 140, 0); }
   *label = "BAD";
   return GC9A01A_RED;
 }
@@ -87,11 +88,12 @@ static void showReading(uint16_t co2, float tempC, float hum) {
   tft.fillRect(10, 96, 220, 48, GC9A01A_BLACK);
   drawCentered(100, 5, color, num);
 
-  // temp (degF) + relative humidity
-  int tF = (int)(tempC * 9.0f / 5.0f + 32.0f + 0.5f);
-  int rh = (int)(hum + 0.5f);
-  char bot[20];
-  snprintf(bot, sizeof(bot), "%dF  %d%%", tF, rh);
+  // temp + relative humidity (unit from settings)
+  float tShow = settings::cfg.tempUnitF ? (tempC * 9.0f / 5.0f + 32.0f) : tempC;
+  char  tUnit = settings::cfg.tempUnitF ? 'F' : 'C';
+  int   rh    = (int)(hum + 0.5f);
+  char  bot[20];
+  snprintf(bot, sizeof(bot), "%d%c  %d%%", (int)(tShow + 0.5f), tUnit, rh);
   tft.fillRect(16, 172, 208, 20, GC9A01A_BLACK);
   drawCentered(176, 2, GC9A01A_WHITE, bot);
 }
@@ -102,12 +104,14 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 3: SCD-41 sensor\n"));
+  Serial.println(F("Phase 4: settings layer + display IA\n"));
+
+  settings::begin();
 
   pinMode(TFT_LITE_PIN, OUTPUT);
-  digitalWrite(TFT_LITE_PIN, HIGH);
+  analogWrite(TFT_LITE_PIN, settings::cfg.brightness);   // backlight duty
   tft.begin();
-  tft.setRotation(0);
+  tft.setRotation(settings::cfg.rotation);
   drawStatic();
 
   enableI2CPower();
@@ -127,10 +131,12 @@ void setup() {
     Serial.println(F("SCD-41 not responding — check the QT chain"));
   }
 
-  // Disable ASC (sealed office) and start measuring (~5s cadence).
-  logScdError("disable ASC", scd4x.setAutomaticSelfCalibrationEnabled(0));
+  // ASC follows the location profile (off for a sealed office).
+  bool asc = settings::ascEnabled();
+  logScdError("set ASC", scd4x.setAutomaticSelfCalibrationEnabled(asc ? 1 : 0));
   logScdError("start", scd4x.startPeriodicMeasurement());
-  Serial.println(F("ASC disabled; periodic measurement started\n"));
+  Serial.printf("ASC %s (profile=%u); periodic measurement started\n\n",
+                asc ? "ENABLED" : "disabled", settings::cfg.profile);
 }
 
 void loop() {
