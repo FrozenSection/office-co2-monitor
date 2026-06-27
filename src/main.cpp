@@ -12,10 +12,13 @@
 #include <SensirionI2cScd4x.h>
 #include <Adafruit_VEML7700.h>
 #include <RTClib.h>
+#include <time.h>
 
 #include "config.h"
 #include "version.h"
 #include "settings.h"
+#include "portal.h"
+#include "qrcode.h"
 
 static Adafruit_GC9A01A tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
 static SensirionI2cScd4x scd4x;
@@ -107,6 +110,29 @@ static void drawZone(int cy, int boxW, int boxH, uint8_t size,
 
 static void drawRing(uint16_t color) {
   for (int r = 112; r <= 119; r++) tft.drawCircle(120, 120, r, color);
+}
+
+// Render a QR code centered on the display: white quiet-zone square with black
+// modules. Sized to stay inside the round panel.
+static void drawQR(const char* text) {
+  uint8_t version = (strlen(text) <= 53) ? 3 : 4;
+  uint8_t buf[qrcode_getBufferSize(4)];
+  QRCode qr;
+  qrcode_initText(&qr, buf, version, ECC_LOW, text);
+
+  const int quiet = 2;
+  int total = qr.size + 2 * quiet;
+  int scale = 150 / total;
+  if (scale < 3) scale = 3;
+  int side = total * scale;
+  int x0 = 120 - side / 2, y0 = 120 - side / 2;
+
+  tft.fillRect(x0, y0, side, side, GC9A01A_WHITE);
+  for (uint8_t y = 0; y < qr.size; y++)
+    for (uint8_t x = 0; x < qr.size; x++)
+      if (qrcode_getModule(&qr, x, y))
+        tft.fillRect(x0 + (quiet + x) * scale, y0 + (quiet + y) * scale,
+                     scale, scale, GC9A01A_BLACK);
 }
 
 // ---- main screen -----------------------------------------------------------
@@ -217,11 +243,20 @@ static void drawResult() {
   }
 }
 
-static void drawWifiStub() {
+static void drawWifiStatus() {
+  uint16_t c = (portal::phase() == portal::P_SYNCED) ? GC9A01A_GREEN
+             : (portal::phase() == portal::P_FAILED) ? GC9A01A_RED
+                                                     : cOrange();
+  drawZone(26, 150, 16, 1, c, portal::statusLine());
+}
+
+static void drawWifiConfig() {
   tft.fillScreen(GC9A01A_BLACK);
-  drawZone(85, 220, 30, 2, GC9A01A_WHITE, "WiFi setup");
-  drawZone(125, 220, 24, 2, cGrey(), "coming soon");
-  drawZone(165, 220, 16, 1, cGrey(), "tap to exit");
+  drawWifiStatus();                          // top: status / instruction
+  char wifi[80];
+  snprintf(wifi, sizeof(wifi), "WIFI:T:nopass;S:%s;;", portal::apSsid());
+  drawQR(wifi);                              // scan with phone camera to join
+  drawZone(214, 150, 16, 1, cGrey(), "tap to exit");
 }
 
 // ---- actions ---------------------------------------------------------------
@@ -255,8 +290,11 @@ static void refreshTime() {
   gTimeValid = false;
   gNowEpoch  = 0;
   if (hasRtc && !rtc.lostPower()) {
-    DateTime n = rtc.now();
-    gHh = n.hour(); gMm = n.minute(); gNowEpoch = n.unixtime();
+    gNowEpoch = rtc.now().unixtime();        // RTC holds UTC
+    time_t t = (time_t)gNowEpoch;
+    struct tm lt;
+    localtime_r(&t, &lt);                     // -> local via the TZ env
+    gHh = lt.tm_hour; gMm = lt.tm_min;
     gTimeValid = true;
   }
 }
@@ -297,6 +335,7 @@ static void updateLuxAndBrightness() {
   static float    ema  = -1;
   static int      applied = -1;
   if (!hasLux) return;
+  if (gState == ST_WIFI) return;        // keep the QR screen at full brightness
   if (millis() - last < 400) return;
   last = millis();
 
@@ -325,9 +364,11 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 7: button + recalibration\n"));
+  Serial.println(F("Phase 8: captive WiFi portal + NTP\n"));
 
   settings::begin();
+  setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
+  tzset();
   pinMode(RECAL_BUTTON_PIN, INPUT_PULLUP);
 
   pinMode(TFT_LITE_PIN, OUTPUT);
@@ -405,8 +446,12 @@ void loop() {
         Serial.println(F("button: tap -> confirm recalibrate"));
         gState = ST_CONFIRM; gStateStart = now; drawConfirm();
       } else if (ev == BTN_HOLD) {
-        Serial.println(F("button: hold -> wifi (stub)"));
-        gState = ST_WIFI; gStateStart = now; drawWifiStub();
+        Serial.println(F("button: hold -> wifi config"));
+        gState = ST_WIFI; gStateStart = now;
+        analogWrite(TFT_LITE_PIN, 255);   // full bright so the QR scans well
+        portal::start();
+        Serial.printf("AP up: %s  http://%s/\n", portal::apSsid(), portal::apIp());
+        drawWifiConfig();
       } else if (tick && gCo2 != 0) {
         renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm,
                    calState(gTimeValid, gNowEpoch));
@@ -445,10 +490,22 @@ void loop() {
         enterMain(now);
       break;
 
-    case ST_WIFI:
-      if (ev == BTN_TAP || ev == BTN_HOLD)
-        enterMain(now);
+    case ST_WIFI: {
+      portal::handle();
+      static char lastStatus[40] = "";
+      if (strcmp(lastStatus, portal::statusLine()) != 0) {
+        strlcpy(lastStatus, portal::statusLine(), sizeof(lastStatus));
+        drawWifiStatus();
+      }
+      uint32_t epoch;
+      if (portal::consumeSynced(epoch)) {
+        rtc.adjust(DateTime(epoch));                 // RTC <- UTC from NTP
+        setenv("TZ", settings::cfg.timezone, 1); tzset();
+        Serial.printf("NTP: RTC set, UTC epoch %u\n", (unsigned)epoch);
+      }
+      if (ev == BTN_TAP) { portal::stop(); enterMain(now); }
       break;
+    }
   }
 
   delay(5);
