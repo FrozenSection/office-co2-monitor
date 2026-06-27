@@ -20,23 +20,54 @@ Feather V2 QT ── SCD-41 ── DS3231
 > (GPIO2). It must be driven HIGH before `Wire.begin()` or the bus scan
 > finds nothing.
 
-## SPI — display (EYESPI)
+## SPI — display (EYESPI), hard-wired
 
-Round GC9A01 240x240 → 18-pin FPC → EYESPI breakout → Feather SPI.
-MISO is unused (display is write-only).
+Round GC9A01 240x240 → 18-pin FPC → EYESPI breakout → soldered to Feather V2.
+Pins verified against the Adafruit Feather V2 and EYESPI breakout pinouts.
 
-| EYESPI | Feather V2 | Purpose                          |
-| ------ | ---------- | -------------------------------- |
-| SCK    | SCK        | SPI clock                        |
-| MOSI   | MO         | SPI data                         |
-| TCS    | GPIO 33\*  | TFT chip select                  |
-| DC     | GPIO 15\*  | data/command                     |
-| RST    | GPIO 32\*  | reset                            |
-| LITE   | GPIO 14\*  | backlight (PWM for dimming)      |
+- **Vin → 3V.** The TFT is rated `Vlogic/Vin 3.3–5VDC` (per its silkscreen) and the
+  EYESPI breakout has **no level shifting**, so driving Vin from the Feather's `3V`
+  pad keeps power and logic both at a clean, in-range 3.3V.
+- **MISO is not wired** — the GC9A01 is write-only.
+- SPI bus pins (`SCK`/`MO`) are the Feather's hardware-SPI pads; don't reassign them.
+- **Only 6 wire colors on hand:** red, black, green, white, blue, yellow. Red/black
+  are reserved for power/ground; yellow and blue are each reused once. Reuses are
+  split across the two header rows so no cluster holds two same-colored wires.
 
-\* Provisional — finalize when wiring the display phase.
+| EYESPI pad | Feather pad     | GPIO | Purpose          | Wire color |
+| ---------- | --------------- | ---- | ---------------- | ---------- |
+| Gnd        | GND             | —    | ground           | Black      |
+| Vin        | 3V              | —    | 3.3V power       | Red        |
+| SCK        | SCK (bottom)    | 5    | SPI clock        | Yellow     |
+| MOSI       | MO (bottom)     | 19   | SPI data in      | Blue       |
+| TCS        | 33 (top)        | 33   | TFT chip select  | Green      |
+| DC         | 32 (top)        | 32   | data/command     | White      |
+| RST        | 27 (top)        | 27   | display reset    | Yellow †   |
+| Lite       | 14 (top)        | 14   | backlight (PWM)  | Blue †     |
+
+(MISO pad: leave unconnected.)
+
+> † Reused color. Yellow is also SCK and blue is also MOSI, but SCK/MO are on the
+> **bottom** header row while RST/Lite are in the **top-row** control cluster
+> (27·33·32·14). Within that cluster all four are unique: 27 Yellow · 33 Green ·
+> 32 White · 14 Blue.
 
 ## Recalibration button
 
-Momentary switch on `GPIO 27`\* to GND, `INPUT_PULLUP`. Triggers the
-fresh-air forced-recalibration (FRC) flow.
+Panel-mounted momentary switch, prewired red/black:
+
+| Button lead | Feather pad | GPIO | Wire color (prewired) |
+| ----------- | ----------- | ---- | --------------------- |
+| red         | A1          | 25   | Red                   |
+| black       | GND         | —    | Black                 |
+
+Firmware uses `INPUT_PULLUP` on GPIO25; pressing pulls it to GND. No external
+resistor needed (GPIO25 has internal pull-ups; it is not a strapping/boot pin).
+Polarity is irrelevant for a plain switch — red→A1, black→GND is just the
+factory wiring.
+
+## Pins left free / system-reserved (do not solder to)
+
+GPIO22/20 (I2C QT), GPIO5/19/21 (SPI), GPIO0 (NeoPixel), GPIO2 (I2C power rail),
+GPIO13 (red LED), GPIO35 (battery monitor), GPIO38 (onboard SW38 button).
+Avoid GPIO12 (boot strapping) and the input-only pins (34/36/37/39).

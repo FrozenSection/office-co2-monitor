@@ -19,7 +19,7 @@
 // =====================================================================
 #define FRC_REFERENCE_PPM   420   // outdoor fresh-air CO2 reference
 #define FRC_EQUILIBRATE_SEC 180   // settle time outside before FRC fires
-#define RECAL_BUTTON_PIN    27    // PROVISIONAL — momentary btn, INPUT_PULLUP
+#define RECAL_BUTTON_PIN    25    // A1 — momentary btn to GND, INPUT_PULLUP
 
 // =====================================================================
 // Calibration-confidence tiers (days since last FRC).
@@ -30,10 +30,12 @@
 #define CAL_OVERDUE_DAYS  21   // grey the reading, mark unverified
 
 // =====================================================================
-// Display — EYESPI / SPI (GC9A01 240x240 round)
-// PROVISIONAL pins; finalize against the EYESPI breakout in display phase.
+// Display — EYESPI / SPI (GC9A01 240x240 round), hard-wired to Feather V2.
+// Pins verified against Adafruit Feather V2 + EYESPI breakout pinouts.
+// Shared hardware SPI bus: SCK=5, MOSI=19, MISO=21 (MISO unused — display
+// is write-only, not wired). EYESPI Vin -> Feather 3V (no level shifting).
 // =====================================================================
-#define TFT_CS_PIN   33
-#define TFT_DC_PIN   15
-#define TFT_RST_PIN  32
-#define TFT_LITE_PIN 14   // backlight, PWM-capable for dimming
+#define TFT_CS_PIN   33   // EYESPI TCS  (clean GPIO)
+#define TFT_DC_PIN   32   // EYESPI DC   (clean GPIO)
+#define TFT_RST_PIN  27   // EYESPI RST  (clean GPIO)
+#define TFT_LITE_PIN 14   // EYESPI Lite — backlight, LEDC PWM for dimming
