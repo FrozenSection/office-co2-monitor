@@ -11,6 +11,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_GC9A01A.h>
 #include <SensirionI2cScd4x.h>
+#include <Adafruit_VEML7700.h>
 
 #include "config.h"
 #include "version.h"
@@ -18,6 +19,9 @@
 
 static Adafruit_GC9A01A tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
 static SensirionI2cScd4x scd4x;
+static Adafruit_VEML7700 veml;
+static bool  hasLux = false;   // VEML7700 detected on the bus
+static float gLux   = -1;      // latest smoothed lux (-1 until first read)
 
 // ---- helpers --------------------------------------------------------------
 
@@ -98,13 +102,43 @@ static void showReading(uint16_t co2, float tempC, float hum) {
   drawCentered(176, 2, GC9A01A_WHITE, bot);
 }
 
+// Optional ambient-light auto-brightness. Reads the VEML7700 (if present),
+// smooths it, maps lux -> backlight between the configured floor/ceiling, and
+// slews gently so the panel never visibly steps.
+static void updateLuxAndBrightness() {
+  static uint32_t last = 0;
+  static float    ema  = -1;
+  static int      applied = -1;
+  if (!hasLux) return;
+  if (millis() - last < 400) return;
+  last = millis();
+
+  float lux = veml.readLux();
+  if (lux >= 0) {
+    ema = (ema < 0) ? lux : (ema * 0.7f + lux * 0.3f);
+    gLux = ema;
+  }
+  if (!settings::cfg.autoBrightness) return;
+
+  float lo = settings::cfg.luxLow, hi = settings::cfg.luxHigh;
+  float t = (hi > lo) ? (gLux - lo) / (hi - lo) : 1.0f;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  int target = settings::cfg.brightnessMin +
+               (int)(t * (settings::cfg.brightnessMax - settings::cfg.brightnessMin));
+
+  if (applied < 0) applied = target;
+  if      (applied < target) applied += min(8, target - applied);
+  else if (applied > target) applied -= min(8, applied - target);
+  analogWrite(TFT_LITE_PIN, applied);
+}
+
 // ---- lifecycle ------------------------------------------------------------
 
 void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 4: settings layer + display IA\n"));
+  Serial.println(F("Phase 5: auto-brightness (VEML7700)\n"));
 
   settings::begin();
 
@@ -117,6 +151,17 @@ void setup() {
   enableI2CPower();
   Wire.begin();
   scanBus();
+
+  // Optional ambient-light sensor (auto-detected) -> enables auto-brightness.
+  Wire.beginTransmission(I2C_ADDR_VEML7700);
+  if (Wire.endTransmission() == 0 && veml.begin(&Wire)) {
+    hasLux = true;
+    veml.setGain(VEML7700_GAIN_1_8);
+    veml.setIntegrationTime(VEML7700_IT_100MS);
+    Serial.println(F("VEML7700: present -> auto-brightness available"));
+  } else {
+    Serial.println(F("VEML7700: not found -> fixed brightness"));
+  }
 
   scd4x.begin(Wire, I2C_ADDR_SCD41);
 
@@ -140,19 +185,26 @@ void setup() {
 }
 
 void loop() {
+  updateLuxAndBrightness();
+
   static uint32_t lastPoll = 0;
-  if (millis() - lastPoll < 1000) return;   // SCD-41 updates every ~5s
-  lastPoll = millis();
-
-  bool ready = false;
-  if (scd4x.getDataReadyStatus(ready) != 0 || !ready) return;
-
-  uint16_t co2 = 0;
-  float tempC = 0, hum = 0;
-  int16_t err = scd4x.readMeasurement(co2, tempC, hum);
-  if (err) { logScdError("read", err); return; }
-  if (co2 == 0) return;   // invalid/warming-up sample
-
-  Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%\n", co2, tempC, hum);
-  showReading(co2, tempC, hum);
+  if (millis() - lastPoll >= 1000) {   // SCD-41 updates ~every 5s
+    lastPoll = millis();
+    bool ready = false;
+    if (scd4x.getDataReadyStatus(ready) == 0 && ready) {
+      uint16_t co2 = 0;
+      float tempC = 0, hum = 0;
+      int16_t err = scd4x.readMeasurement(co2, tempC, hum);
+      if (err) {
+        logScdError("read", err);
+      } else if (co2 != 0) {
+        if (hasLux)
+          Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%  lux=%.0f\n", co2, tempC, hum, gLux);
+        else
+          Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%\n", co2, tempC, hum);
+        showReading(co2, tempC, hum);
+      }
+    }
+  }
+  delay(5);
 }

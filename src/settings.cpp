@@ -8,7 +8,7 @@ Settings cfg;
 
 static Preferences prefs;
 static const char* NS = "co2cfg";
-static const uint16_t SCHEMA_VERSION = 1;
+static const uint16_t SCHEMA_VERSION = 2;
 
 static void loadDefaults(Settings& c) {
   c.frcReferencePpm = FRC_REFERENCE_PPM;
@@ -18,6 +18,12 @@ static void loadDefaults(Settings& c) {
   c.rotation   = DEFAULT_ROTATION;
   c.brightness = DEFAULT_BRIGHTNESS;
   c.tempUnitF  = DEFAULT_TEMP_UNIT_F;
+
+  c.autoBrightness = DEFAULT_AUTO_BRIGHTNESS;
+  c.brightnessMin  = DEFAULT_BRIGHT_MIN;
+  c.brightnessMax  = DEFAULT_BRIGHT_MAX;
+  c.luxLow         = DEFAULT_LUX_LOW;
+  c.luxHigh        = DEFAULT_LUX_HIGH;
 
   c.aqGood = AQ_GOOD_PPM;
   c.aqFair = AQ_FAIR_PPM;

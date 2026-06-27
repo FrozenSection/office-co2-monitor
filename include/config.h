@@ -6,6 +6,8 @@
 #define I2C_ADDR_SCD41      0x62
 #define I2C_ADDR_DS3231     0x68
 #define I2C_ADDR_RTC_EEPROM 0x57   // AT24C32 on the DS3231 module (harmless)
+#define I2C_ADDR_VEML7700   0x10   // optional ambient-light sensor (auto-detected)
+#define I2C_ADDR_MAX17048   0x36   // optional LiPo fuel gauge (auto-detected, later)
 
 // The Feather V2 powers its STEMMA QT / I2C port through this pin.
 // It MUST be driven HIGH before Wire.begin() or NO I2C device responds
@@ -55,3 +57,12 @@
 
 #define DEFAULT_TZ        "UTC0"        // POSIX TZ string; set real zone in UI
 #define DEFAULT_HOSTNAME  "office-co2"  // mDNS / AP name base
+
+// Auto-brightness (active only when a VEML7700 is detected). Lux below
+// DEFAULT_LUX_LOW maps to BRIGHT_MIN, lux above DEFAULT_LUX_HIGH to BRIGHT_MAX.
+// Tune the lux endpoints to your enclosure window after it's printed.
+#define DEFAULT_AUTO_BRIGHTNESS true
+#define DEFAULT_BRIGHT_MIN  15     // night floor (never fully dark)
+#define DEFAULT_BRIGHT_MAX  255    // bright-room ceiling
+#define DEFAULT_LUX_LOW     8      // lux at/below this -> min brightness
+#define DEFAULT_LUX_HIGH    300    // lux at/above this -> max brightness

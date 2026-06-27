@@ -19,8 +19,15 @@ struct Settings {
 
   // --- display ---
   uint8_t  rotation;          // 0..3
-  uint8_t  brightness;        // 0..255 backlight duty
+  uint8_t  brightness;        // 0..255 fixed duty (used when auto is off / no lux)
   bool     tempUnitF;         // true=degF, false=degC
+
+  // --- auto-brightness (only applied when a VEML7700 is present) ---
+  bool     autoBrightness;
+  uint8_t  brightnessMin;     // night floor
+  uint8_t  brightnessMax;     // bright-room ceiling
+  uint16_t luxLow;            // lux mapped to brightnessMin
+  uint16_t luxHigh;           // lux mapped to brightnessMax
 
   // --- air-quality tier ceilings (ppm) ---
   uint16_t aqGood;            // <= GOOD
