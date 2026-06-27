@@ -1,22 +1,24 @@
 // office-co2-monitor
-// Phase 2: display bring-up. Lights the round GC9A01 (240x240) over the
-// EYESPI breakout and draws a test pattern that exercises color channels,
-// full-screen extent, and refresh — so the soldered display path can be
-// verified before the sensors are added.
+// Phase 3: SCD-41 CO2 sensor. Reads CO2 / temperature / humidity over the
+// STEMMA QT chain and shows a live, color-coded readout on the round display.
 //
-// Still enables the I2C power rail and scans the bus (Phase 1) so the scan
-// reports the SCD-41 (0x62) + DS3231 (0x68) once the QT chain is attached.
-// With no QT connected they correctly report MISSING — that is expected.
+// Automatic self-calibration (ASC) is DISABLED here: this office never sees
+// fresh outdoor air, so ASC would slowly miscalibrate. Accuracy instead comes
+// from on-demand forced recalibration (the fresh-air walk) — wired up later.
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_GC9A01A.h>
+#include <SensirionI2cScd4x.h>
 
 #include "config.h"
 #include "version.h"
 
 static Adafruit_GC9A01A tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
+static SensirionI2cScd4x scd4x;
+
+// ---- helpers --------------------------------------------------------------
 
 static void enableI2CPower() {
   pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
@@ -36,62 +38,115 @@ static void scanBus() {
     }
   }
   Serial.printf("  SCD-41 (0x62): %s\n", scd ? "OK" : "MISSING");
-  Serial.printf("  DS3231 (0x68): %s\n", rtc ? "OK" : "MISSING");
-  Serial.println(F("  (MISSING is expected until the QT chain is attached)\n"));
+  Serial.printf("  DS3231 (0x68): %s  (RTC is Phase 4)\n\n", rtc ? "OK" : "MISSING");
 }
 
-static void drawTestScreen() {
+static void logScdError(const char* ctx, int16_t err) {
+  if (err == 0) return;
+  char msg[64];
+  errorToString((uint16_t)err, msg, sizeof(msg));
+  Serial.printf("SCD-41 %s error: %s\n", ctx, msg);
+}
+
+// Air-quality tier -> color + short label. Logic only; palette is provisional
+// (designer will refine, and the amber/amber collision is a known TODO).
+static uint16_t co2Color(uint16_t co2, const char** label) {
+  if (co2 <= 800)  { *label = "GOOD"; return GC9A01A_GREEN; }
+  if (co2 <= 1200) { *label = "FAIR"; return GC9A01A_YELLOW; }
+  if (co2 <= 1500) { *label = "POOR"; return tft.color565(255, 140, 0); }
+  *label = "BAD";
+  return GC9A01A_RED;
+}
+
+static void drawCentered(int y, uint8_t size, uint16_t color, const char* s) {
+  int w = (int)strlen(s) * 6 * size;  // GFX default font: 6px/char * size
+  tft.setTextSize(size);
+  tft.setTextColor(color);
+  tft.setCursor(120 - w / 2, y);
+  tft.print(s);
+}
+
+static void drawStatic() {
   tft.fillScreen(GC9A01A_BLACK);
-
-  // Bezel ring — confirms full extent / centering on the round panel.
-  tft.drawCircle(120, 120, 118, GC9A01A_WHITE);
-
-  // Color-channel check — if any dot is wrong/missing, suspect that data line.
-  tft.fillCircle(120, 58, 16, GC9A01A_RED);
-  tft.fillCircle(92, 104, 16, GC9A01A_GREEN);
-  tft.fillCircle(148, 104, 16, GC9A01A_BLUE);
-
-  tft.setTextColor(GC9A01A_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(36, 140);   // ~centered for 14 chars * 12px
-  tft.print("office-co2");
-
-  tft.setTextSize(2);
-  tft.setTextColor(GC9A01A_CYAN);
-  tft.setCursor(84, 166);   // ~centered for "v0.2.0"
-  tft.print("v" FIRMWARE_VERSION);
+  tft.drawCircle(120, 120, 118, GC9A01A_WHITE);   // bezel ring
+  drawCentered(150, 2, tft.color565(130, 130, 130), "ppm");
+  drawCentered(100, 2, GC9A01A_WHITE, "warming up");
 }
+
+static void showReading(uint16_t co2, float tempC, float hum) {
+  const char* label;
+  uint16_t color = co2Color(co2, &label);
+
+  // status word
+  tft.fillRect(30, 48, 180, 22, GC9A01A_BLACK);
+  drawCentered(50, 2, color, label);
+
+  // big CO2 number
+  char num[8];
+  snprintf(num, sizeof(num), "%u", co2);
+  tft.fillRect(10, 96, 220, 48, GC9A01A_BLACK);
+  drawCentered(100, 5, color, num);
+
+  // temp (degF) + relative humidity
+  int tF = (int)(tempC * 9.0f / 5.0f + 32.0f + 0.5f);
+  int rh = (int)(hum + 0.5f);
+  char bot[20];
+  snprintf(bot, sizeof(bot), "%dF  %d%%", tF, rh);
+  tft.fillRect(16, 172, 208, 20, GC9A01A_BLACK);
+  drawCentered(176, 2, GC9A01A_WHITE, bot);
+}
+
+// ---- lifecycle ------------------------------------------------------------
 
 void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 2: display bring-up\n"));
+  Serial.println(F("Phase 3: SCD-41 sensor\n"));
 
-  // Backlight full on (PWM dimming comes later).
   pinMode(TFT_LITE_PIN, OUTPUT);
   digitalWrite(TFT_LITE_PIN, HIGH);
-
   tft.begin();
   tft.setRotation(0);
-  drawTestScreen();
-  Serial.println(F("display: test pattern drawn"));
+  drawStatic();
 
   enableI2CPower();
   Wire.begin();
   scanBus();
+
+  scd4x.begin(Wire, I2C_ADDR_SCD41);
+
+  // Ensure idle before configuring (it may still be measuring from last run).
+  logScdError("stop", scd4x.stopPeriodicMeasurement());
+  delay(500);
+
+  uint64_t serial = 0;
+  if (scd4x.getSerialNumber(serial) == 0) {
+    Serial.printf("SCD-41 serial: 0x%llX\n", (unsigned long long)serial);
+  } else {
+    Serial.println(F("SCD-41 not responding — check the QT chain"));
+  }
+
+  // Disable ASC (sealed office) and start measuring (~5s cadence).
+  logScdError("disable ASC", scd4x.setAutomaticSelfCalibrationEnabled(0));
+  logScdError("start", scd4x.startPeriodicMeasurement());
+  Serial.println(F("ASC disabled; periodic measurement started\n"));
 }
 
 void loop() {
-  // Live counter near the bottom proves the panel is refreshing, not frozen.
-  static uint32_t last = 0;
-  uint32_t secs = millis() / 1000;
-  if (secs != last) {
-    last = secs;
-    tft.fillRect(70, 196, 100, 20, GC9A01A_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(GC9A01A_WHITE);
-    tft.setCursor(78, 198);
-    tft.printf("%lus", (unsigned long)secs);
-  }
+  static uint32_t lastPoll = 0;
+  if (millis() - lastPoll < 1000) return;   // SCD-41 updates every ~5s
+  lastPoll = millis();
+
+  bool ready = false;
+  if (scd4x.getDataReadyStatus(ready) != 0 || !ready) return;
+
+  uint16_t co2 = 0;
+  float tempC = 0, hum = 0;
+  int16_t err = scd4x.readMeasurement(co2, tempC, hum);
+  if (err) { logScdError("read", err); return; }
+  if (co2 == 0) return;   // invalid/warming-up sample
+
+  Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%\n", co2, tempC, hum);
+  showReading(co2, tempC, hum);
 }
