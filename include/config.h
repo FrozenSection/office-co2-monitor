@@ -23,6 +23,11 @@
 #define FRC_EQUILIBRATE_SEC 180   // settle time outside before FRC fires
 #define RECAL_BUTTON_PIN    25    // A1 — momentary btn to GND, INPUT_PULLUP
 
+#define BTN_DEBOUNCE_MS     25
+#define BTN_HOLD_MS         3000  // hold this long -> enter WiFi config
+#define RECAL_CONFIRM_SEC   10    // confirm screen auto-cancels after this
+#define RECAL_RESULT_SEC    6     // result screen dwell before returning
+
 // =====================================================================
 // Calibration-confidence tiers (days since last FRC).
 // Logic only — palette is deliberately kept separate (designer TODO).
