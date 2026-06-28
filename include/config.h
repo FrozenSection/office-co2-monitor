@@ -68,6 +68,11 @@
 #define DEFAULT_HOSTNAME    "stuffy" // mDNS (<name>.local) / AP name base
 #define DEFAULT_STA_ENABLED false    // stay on home WiFi + serve LAN page
 
+// Data logging (internal LittleFS)
+#define DEFAULT_LOG_INTERVAL_SEC 300   // sample period (tunable in settings)
+#define LOG_MAX_RECS_PER_FILE    8000  // ~72KB/file; 2 files -> ~16k records
+#define LOG_GRAPH_MAX_POINTS     600   // downsample the chart to this many
+
 // Auto-brightness (active only when a VEML7700 is detected). Lux below
 // DEFAULT_LUX_LOW maps to BRIGHT_MIN, lux above DEFAULT_LUX_HIGH to BRIGHT_MAX.
 // Tune the lux endpoints to your enclosure window after it's printed.

@@ -1,6 +1,7 @@
 #include "portal.h"
 #include "config.h"
 #include "settings.h"
+#include "datalog.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -35,6 +36,28 @@ const char* TZ_OPTIONS[][2] = {
   {"UTC0",                    "UTC"},
 };
 const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\xB0"};
+
+const char* HISTORY_PAGE =
+  "<!doctype html><meta charset=utf-8>"
+  "<meta name=viewport content='width=device-width,initial-scale=1'>"
+  "<title>stuffy history</title>"
+  "<style>body{font-family:system-ui;margin:16px;max-width:760px}h1{font-size:18px}"
+  "a{font-size:13px;margin-right:14px}#c{max-width:100%}</style>"
+  "<h1>stuffy \xE2\x80\x94 history</h1>"
+  "<div><a href='/'>\xE2\x86\x90 settings</a><a href='/data.csv'>download CSV</a>"
+  "<span id=n style='color:#777;font-size:12px'></span></div>"
+  "<canvas id=c height=240></canvas>"
+  "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>"
+  "<script>fetch('/data.json').then(r=>r.json()).then(d=>{"
+  "document.getElementById('n').textContent=' '+d.length+' points';"
+  "const lab=d.map(x=>new Date(x[0]*1000).toLocaleString([],"
+  "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));"
+  "new Chart(document.getElementById('c'),{type:'line',data:{labels:lab,datasets:["
+  "{label:'CO2 ppm',data:d.map(x=>x[1]),borderColor:'#e2554b',pointRadius:0,borderWidth:2,yAxisID:'y'},"
+  "{label:'temp',data:d.map(x=>x[2]),borderColor:'#3E8BF0',pointRadius:0,borderWidth:1,yAxisID:'y2'}]},"
+  "options:{animation:false,interaction:{mode:'index',intersect:false},"
+  "scales:{x:{ticks:{maxTicksLimit:8}},y:{position:'left'},"
+  "y2:{position:'right',grid:{drawOnChartArea:false}}}}});});</script>";
 
 // --- html builders ---
 String lbl(const char* t) { return "<label>" + String(t) + "</label>"; }
@@ -100,6 +123,10 @@ String pageHtml() {
        + opt("1", profCur.c_str(), "Ventilated (ASC on)") + "</select>";
   h += lbl("Reminder days: aging / stale / overdue")
        + num("cala", c.calAgingDays) + num("cals", c.calStaleDays) + num("calo", c.calOverdueDays);
+
+  h += "<h2>LOGGING</h2>";
+  h += lbl("Log interval (seconds)") + num("logiv", c.logIntervalSec);
+  h += "<div class=s style='margin-top:6px'><a href='/history'>View history graph &rarr;</a></div>";
 
   h += "<h2>NETWORK</h2>";
   h += lbl("Device name (<name>.local + AP)")
@@ -170,6 +197,7 @@ void applyFormToSettings() {
   if (server.arg("host").length())
     strlcpy(c.hostname, server.arg("host").c_str(), sizeof(c.hostname));
   c.staEnabled = server.hasArg("sta");
+  c.logIntervalSec = constrain(server.arg("logiv").toInt(), 5, 86400);
   String wpw = server.arg("webpw");
   if (wpw.length()) strlcpy(c.webPassword, wpw.c_str(), sizeof(c.webPassword));
 
@@ -281,11 +309,63 @@ void handleNotFound() {
   }
 }
 
+void handleHistory() {
+  if (!authed()) return;
+  server.send(200, "text/html", HISTORY_PAGE);
+}
+
+void handleDataJson() {
+  if (!authed()) return;
+  uint32_t total  = datalog::count();
+  uint32_t stride = (total > LOG_GRAPH_MAX_POINTS) ? (total / LOG_GRAPH_MAX_POINTS) : 1;
+  if (stride == 0) stride = 1;
+  bool unitF = settings::cfg.tempUnitF;
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  server.sendContent("[");
+  String buf; buf.reserve(2048);
+  uint32_t i = 0; bool first = true;
+  datalog::readAll([&](const datalog::Rec& r) {
+    if ((i++ % stride) != 0) return;
+    float temp = unitF ? (r.tempC10 / 10.0f * 9.0f / 5.0f + 32.0f) : r.tempC10 / 10.0f;
+    if (!first) buf += ',';
+    first = false;
+    buf += '['; buf += r.t; buf += ','; buf += r.co2; buf += ',';
+    buf += String(temp, 1); buf += ','; buf += r.rh; buf += ']';
+    if (buf.length() > 1800) { server.sendContent(buf); buf = ""; }
+  });
+  if (buf.length()) server.sendContent(buf);
+  server.sendContent("]");
+  server.sendContent("");
+}
+
+void handleDataCsv() {
+  if (!authed()) return;
+  bool unitF = settings::cfg.tempUnitF;
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.sendHeader("Content-Disposition", "attachment; filename=stuffy-history.csv");
+  server.send(200, "text/csv", "");
+  server.sendContent(unitF ? "unix_time,co2_ppm,temp_F,rh\n" : "unix_time,co2_ppm,temp_C,rh\n");
+  String buf; buf.reserve(2048);
+  datalog::readAll([&](const datalog::Rec& r) {
+    float temp = unitF ? (r.tempC10 / 10.0f * 9.0f / 5.0f + 32.0f) : r.tempC10 / 10.0f;
+    buf += r.t; buf += ','; buf += r.co2; buf += ',';
+    buf += String(temp, 1); buf += ','; buf += r.rh; buf += '\n';
+    if (buf.length() > 1800) { server.sendContent(buf); buf = ""; }
+  });
+  if (buf.length()) server.sendContent(buf);
+  server.sendContent("");
+}
+
 void setupRoutes() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSaveSettings);
   server.on("/sync", HTTP_POST, handleSync);
   server.on("/restart", HTTP_POST, handleRestart);
+  server.on("/history", handleHistory);
+  server.on("/data.json", handleDataJson);
+  server.on("/data.csv", handleDataCsv);
   server.onNotFound(handleNotFound);
   ElegantOTA.begin(&server);                 // serves /update with a progress UI
   if (settings::cfg.webPassword[0])

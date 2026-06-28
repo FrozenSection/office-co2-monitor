@@ -19,6 +19,7 @@
 #include "settings.h"
 #include "portal.h"
 #include "qrcode.h"
+#include "datalog.h"
 
 static Adafruit_GC9A01A tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
 static SensirionI2cScd4x scd4x;
@@ -375,7 +376,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 11: ElegantOTA + web auth\n"));
+  Serial.println(F("Phase 12: data logging + history graph\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -427,6 +428,8 @@ void setup() {
                 asc ? "ENABLED" : "disabled", settings::cfg.profile);
   Serial.println(F("button: tap=recalibrate, hold=wifi\n"));
 
+  datalog::begin();
+
   // Home-WiFi (STA) background server, if enabled + creds present.
   if (settings::cfg.staEnabled && settings::cfg.wifiSsid[0]) {
     Serial.println(F("WiFi: trying home network..."));
@@ -472,6 +475,18 @@ void loop() {
       }
     }
     refreshTime();
+
+    // Periodic data log — needs a fresh reading and a real (RTC) clock.
+    static uint32_t lastLog = 0;
+    static bool     loggedFirst = false;
+    if (gCo2 != 0 && gTimeValid) {
+      uint32_t ivMs = (uint32_t)settings::cfg.logIntervalSec * 1000;
+      if (!loggedFirst || now - lastLog >= ivMs) {
+        loggedFirst = true;
+        lastLog = now;
+        datalog::append(gNowEpoch, gCo2, gTempC, gHum);
+      }
+    }
   }
 
   switch (gState) {

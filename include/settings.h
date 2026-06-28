@@ -49,6 +49,7 @@ struct Settings {
   char     hostname[24];
   bool     staEnabled;        // stay connected to home WiFi + serve LAN page
   char     webPassword[33];   // HTTP basic auth for settings + OTA (blank = off)
+  uint16_t logIntervalSec;    // data-log sample period
 };
 // NOTE: only ever APPEND fields (settings::begin migrates by partial load).
 
