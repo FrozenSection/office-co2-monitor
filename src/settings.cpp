@@ -8,7 +8,7 @@ Settings cfg;
 
 static Preferences prefs;
 static const char* NS = "co2cfg";
-static const uint16_t SCHEMA_VERSION = 2;
+static const uint16_t SCHEMA_VERSION = 3;
 
 static void loadDefaults(Settings& c) {
   c.frcReferencePpm = FRC_REFERENCE_PPM;
@@ -41,22 +41,26 @@ static void loadDefaults(Settings& c) {
   c.wifiPass[0] = '\0';
   strncpy(c.hostname, DEFAULT_HOSTNAME, sizeof(c.hostname) - 1);
   c.hostname[sizeof(c.hostname) - 1] = '\0';
+  c.staEnabled = DEFAULT_STA_ENABLED;
 }
 
 void settings::begin() {
   loadDefaults(cfg);
   prefs.begin(NS, false);
 
-  uint16_t ver = prefs.getUShort("ver", 0);
-  size_t   len = prefs.getBytesLength("blob");
-  if (ver == SCHEMA_VERSION && len == sizeof(Settings)) {
+  size_t len = prefs.getBytesLength("blob");
+  if (len > 0 && len <= sizeof(Settings)) {
+    // Partial load: stored bytes fill the matching prefix; appended (newer)
+    // fields keep their defaults. Safe because we only ever append fields.
     prefs.getBytes("blob", &cfg, sizeof(Settings));
-    Serial.println(F("settings: loaded from NVS"));
+    Serial.printf("settings: loaded (%u of %u bytes)\n",
+                  (unsigned)len, (unsigned)sizeof(Settings));
   } else {
-    prefs.putUShort("ver", SCHEMA_VERSION);
-    prefs.putBytes("blob", &cfg, sizeof(Settings));
     Serial.println(F("settings: seeded defaults"));
   }
+  // Rewrite in the current size so the next boot is a clean full load.
+  prefs.putUShort("ver", SCHEMA_VERSION);
+  prefs.putBytes("blob", &cfg, sizeof(Settings));
   prefs.end();
 }
 

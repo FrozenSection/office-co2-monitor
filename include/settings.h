@@ -47,7 +47,9 @@ struct Settings {
   char     wifiSsid[33];
   char     wifiPass[64];
   char     hostname[24];
+  bool     staEnabled;        // stay connected to home WiFi + serve LAN page
 };
+// NOTE: only ever APPEND fields (settings::begin migrates by partial load).
 
 namespace settings {
   extern Settings cfg;

@@ -1,24 +1,30 @@
 #pragma once
 #include <Arduino.h>
 
-// On-demand WiFi config portal: a captive AP serving a small page to enter
-// home WiFi credentials + timezone, then connect (STA) and fetch time via NTP.
-// WiFi is only up while the portal is active (entered by the button hold).
+// WiFi config + OTA. Two modes:
+//  - AP   : on-demand captive portal (button hold, off-network) for first setup.
+//  - STA  : when staEnabled + creds are set, connect to home WiFi at boot and
+//           serve the same settings page (and OTA) on the LAN at <host>.local.
+// Both serve identical routes: "/" settings, "/save", "/sync", "/update" (OTA).
 
 namespace portal {
   enum Phase { P_AP, P_CONNECTING, P_SYNCED, P_FAILED };
 
-  void start();      // bring up AP + captive DNS + web server
-  void handle();     // pump DNS + server; call frequently while active
-  void stop();       // tear down everything, radio off
-  bool active();
+  void startAP();      // captive AP + DNS + server
+  bool startSTA();     // connect home WiFi + mDNS + server + NTP; true if joined
+  void handle();       // pump DNS/server; call every loop while active
+  void stopAP();       // tear down AP (STA, if up, is left running)
+
+  bool apActive();
+  bool staActive();
 
   const char* apSsid();
   const char* apIp();
-  Phase       phase();
-  const char* statusLine();                // short status for the display
+  const char* hostUrl();   // "<hostname>.local"
+  const char* staIp();
 
-  // True exactly once after a successful NTP sync; yields the UTC epoch so
-  // the caller can set the RTC.
-  bool consumeSynced(uint32_t& epochUtc);
+  Phase       phase();
+  const char* statusLine();
+
+  bool consumeSynced(uint32_t& epochUtc);   // true once after a good NTP sync
 }

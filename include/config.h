@@ -60,8 +60,9 @@
 #define AQ_FAIR_PPM   1200
 #define AQ_POOR_PPM   1500
 
-#define DEFAULT_TZ        "UTC0"        // POSIX TZ string; set real zone in UI
-#define DEFAULT_HOSTNAME  "office-co2"  // mDNS / AP name base
+#define DEFAULT_TZ          "UTC0"   // POSIX TZ string; set real zone in UI
+#define DEFAULT_HOSTNAME    "stuffy" // mDNS (<name>.local) / AP name base
+#define DEFAULT_STA_ENABLED false    // stay on home WiFi + serve LAN page
 
 // Auto-brightness (active only when a VEML7700 is detected). Lux below
 // DEFAULT_LUX_LOW maps to BRIGHT_MIN, lux above DEFAULT_LUX_HIGH to BRIGHT_MAX.

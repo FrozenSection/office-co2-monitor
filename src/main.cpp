@@ -250,13 +250,22 @@ static void drawWifiStatus() {
   drawZone(26, 150, 16, 1, c, portal::statusLine());
 }
 
-static void drawWifiConfig() {
+static void drawWifiAP() {
   tft.fillScreen(GC9A01A_BLACK);
   drawWifiStatus();                          // top: status / instruction
   char wifi[80];
   snprintf(wifi, sizeof(wifi), "WIFI:T:nopass;S:%s;;", portal::apSsid());
   drawQR(wifi);                              // scan with phone camera to join
   drawZone(214, 150, 16, 1, cGrey(), "tap to exit");
+}
+
+static void drawWifiSTA() {
+  tft.fillScreen(GC9A01A_BLACK);
+  drawZone(58, 220, 20, 2, GC9A01A_GREEN, "home wifi");
+  drawZone(92, 230, 14, 1, cGrey(), "browse to:");
+  drawZone(114, 230, 16, 1, GC9A01A_CYAN, portal::hostUrl());
+  drawZone(138, 230, 16, 1, GC9A01A_CYAN, portal::staIp());
+  drawZone(198, 220, 14, 1, cGrey(), "tap to exit");
 }
 
 // ---- actions ---------------------------------------------------------------
@@ -366,7 +375,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 8: captive WiFi portal + NTP\n"));
+  Serial.println(F("Phase 10: home WiFi (STA) + mDNS + OTA\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -417,12 +426,32 @@ void setup() {
   Serial.printf("ASC %s (profile=%u); measuring\n",
                 asc ? "ENABLED" : "disabled", settings::cfg.profile);
   Serial.println(F("button: tap=recalibrate, hold=wifi\n"));
+
+  // Home-WiFi (STA) background server, if enabled + creds present.
+  if (settings::cfg.staEnabled && settings::cfg.wifiSsid[0]) {
+    Serial.println(F("WiFi: trying home network..."));
+    if (portal::startSTA())
+      Serial.printf("WiFi: connected -> http://%s/  (%s)\n", portal::hostUrl(), portal::staIp());
+    else
+      Serial.println(F("WiFi: home network not reachable"));
+  }
 }
 
 void loop() {
   updateLuxAndBrightness();
   BtnEv ev = pollButton();
   uint32_t now = millis();
+
+  // Keep the web server (AP or home-WiFi STA) responsive, and adopt NTP time.
+  if (portal::apActive() || portal::staActive()) {
+    portal::handle();
+    uint32_t epoch;
+    if (portal::consumeSynced(epoch)) {
+      rtc.adjust(DateTime(epoch));
+      setenv("TZ", settings::cfg.timezone, 1); tzset();
+      Serial.printf("NTP: RTC set, UTC epoch %u\n", (unsigned)epoch);
+    }
+  }
 
   static uint32_t lastTick = 0;
   bool tick = (now - lastTick >= 1000);
@@ -448,12 +477,17 @@ void loop() {
         Serial.println(F("button: tap -> confirm recalibrate"));
         gState = ST_CONFIRM; gStateStart = now; drawConfirm();
       } else if (ev == BTN_HOLD) {
-        Serial.println(F("button: hold -> wifi config"));
         gState = ST_WIFI; gStateStart = now;
-        analogWrite(TFT_LITE_PIN, 255);   // full bright so the QR scans well
-        portal::start();
-        Serial.printf("AP up: %s  http://%s/\n", portal::apSsid(), portal::apIp());
-        drawWifiConfig();
+        if (portal::staActive()) {            // already on home WiFi -> show LAN URL
+          Serial.println(F("button: hold -> wifi info (home)"));
+          drawWifiSTA();
+        } else {                              // off-network -> captive AP + QR
+          Serial.println(F("button: hold -> wifi config AP"));
+          analogWrite(TFT_LITE_PIN, 255);     // full bright so the QR scans well
+          portal::startAP();
+          Serial.printf("AP up: %s  http://%s/\n", portal::apSsid(), portal::apIp());
+          drawWifiAP();
+        }
       } else if (tick && gCo2 != 0) {
         renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm,
                    calState(gTimeValid, gNowEpoch));
@@ -493,19 +527,17 @@ void loop() {
       break;
 
     case ST_WIFI: {
-      portal::handle();
-      static char lastStatus[40] = "";
-      if (strcmp(lastStatus, portal::statusLine()) != 0) {
-        strlcpy(lastStatus, portal::statusLine(), sizeof(lastStatus));
-        drawWifiStatus();
+      if (portal::apActive()) {                      // AP: refresh the status line
+        static char lastStatus[40] = "";
+        if (strcmp(lastStatus, portal::statusLine()) != 0) {
+          strlcpy(lastStatus, portal::statusLine(), sizeof(lastStatus));
+          drawWifiStatus();
+        }
       }
-      uint32_t epoch;
-      if (portal::consumeSynced(epoch)) {
-        rtc.adjust(DateTime(epoch));                 // RTC <- UTC from NTP
-        setenv("TZ", settings::cfg.timezone, 1); tzset();
-        Serial.printf("NTP: RTC set, UTC epoch %u\n", (unsigned)epoch);
+      if (ev == BTN_TAP) {
+        if (portal::apActive()) portal::stopAP();     // STA, if up, keeps serving
+        enterMain(now);
       }
-      if (ev == BTN_TAP) { portal::stop(); enterMain(now); }
       break;
     }
   }
