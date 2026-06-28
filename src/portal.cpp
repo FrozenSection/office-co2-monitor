@@ -37,30 +37,98 @@ const char* TZ_OPTIONS[][2] = {
 };
 const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\xB0"};
 
+// Shared CSS for all served pages, so settings / history / diagnostics / result
+// pages look like one app. Built as a macro so the static const pages can splice
+// it at compile time.
+#define UI_CSS \
+  "<style>" \
+  "body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#f4f4f3;color:#222}" \
+  ".wrap{max-width:480px;margin:0 auto;padding:18px 16px 28px}" \
+  "h1{font-size:18px;font-weight:500;margin:2px 0 12px}" \
+  ".nav{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;margin-bottom:14px}" \
+  ".nav a{color:#159b90;text-decoration:none}" \
+  ".card{background:#fff;border:1px solid #e4e4e0;border-radius:12px;padding:14px 16px;margin-bottom:12px}" \
+  ".sec{font-size:13px;color:#159b90;font-weight:500;margin:0 0 12px}" \
+  ".f{margin-bottom:14px}.f:last-child{margin-bottom:0}" \
+  "label{display:block;font-size:13px;color:#3c3c3a;margin-bottom:5px}" \
+  ".hint{font-size:12px;color:#9a9a95;margin-top:4px}" \
+  "input,select{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #d6d6d2;border-radius:8px;font-size:15px;color:#222;background:#fff}" \
+  "input:focus,select:focus{outline:none;border-color:#159b90}" \
+  ".row{display:flex;gap:10px}.row>div{flex:1}" \
+  ".cap{display:block;font-size:12px;color:#888;margin-bottom:4px}" \
+  ".chk{display:flex;align-items:center;gap:9px;font-size:13px;color:#3c3c3a;margin-bottom:0}" \
+  ".chk input{width:17px;height:17px;margin:0;flex:none}" \
+  "button{padding:12px;font-size:14px;border:0;border-radius:8px;color:#fff;cursor:pointer}" \
+  ".btns{display:flex;gap:10px;margin-top:4px}.btns button{flex:1}" \
+  ".save{background:#3a3a38}.sync{background:#1d9e75}" \
+  ".s{font-size:12px;color:#888;line-height:1.55}.s a{color:#159b90}" \
+  "a{color:#159b90}" \
+  ".stat{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #f0f0ec;font-size:13px}" \
+  ".stat:last-child{border-bottom:0}.k{color:#777}.v{color:#222;font-variant-numeric:tabular-nums}" \
+  ".d{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:1px}" \
+  "</style>"
+
 const char* HISTORY_PAGE =
   "<!doctype html><meta charset=utf-8>"
   "<meta name=viewport content='width=device-width,initial-scale=1'>"
   "<title>stuffy history</title>"
-  "<style>body{font-family:system-ui;margin:16px;max-width:760px}h1{font-size:18px}"
-  "a{font-size:13px;margin-right:14px}#c{max-width:100%}</style>"
-  "<h1>stuffy \xE2\x80\x94 history</h1>"
-  "<div><a href='/'>\xE2\x86\x90 settings</a><a href='/data.csv'>download CSV</a>"
-  "<span id=n style='color:#777;font-size:12px'></span></div>"
-  "<canvas id=c height=240></canvas>"
+  UI_CSS
+  "<div class=wrap><h1>History</h1>"
+  "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a>"
+  "<a href='/events'>Event log</a><a href='/data.csv'>Download CSV</a>"
+  "<span id=n style='color:#999'></span></div>"
+  "<div class=card><canvas id=c height=240></canvas></div></div>"
   "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>"
   "<script>fetch('/data.json').then(r=>r.json()).then(d=>{"
-  "document.getElementById('n').textContent=' '+d.length+' points';"
+  "document.getElementById('n').textContent=d.length+' points';"
   "const lab=d.map(x=>new Date(x[0]*1000).toLocaleString([],"
   "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));"
   "new Chart(document.getElementById('c'),{type:'line',data:{labels:lab,datasets:["
   "{label:'CO2 ppm',data:d.map(x=>x[1]),borderColor:'#e2554b',pointRadius:0,borderWidth:2,yAxisID:'y'},"
   "{label:'temp',data:d.map(x=>x[2]),borderColor:'#3E8BF0',pointRadius:0,borderWidth:1,yAxisID:'y2'}]},"
   "options:{animation:false,interaction:{mode:'index',intersect:false},"
-  "scales:{x:{ticks:{maxTicksLimit:8}},y:{position:'left'},"
-  "y2:{position:'right',grid:{drawOnChartArea:false}}}}});});</script>";
+  "plugins:{legend:{labels:{boxWidth:12,font:{size:11}}}},"
+  "scales:{x:{ticks:{maxTicksLimit:8,font:{size:10}}},"
+  "y:{position:'left',grace:'8%',title:{display:true,text:'ppm'}},"
+  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});});</script>";
 
 // --- html builders ---
-String lbl(const char* t) { return "<label>" + String(t) + "</label>"; }
+String card(const char* sec, const String& body) {
+  return "<div class=card><div class=sec>" + String(sec) + "</div>" + body + "</div>";
+}
+
+String fieldH(const char* label, const String& input, const char* hint = "") {
+  String s = "<div class=f><label>"; s += label; s += "</label>"; s += input;
+  if (hint && *hint) { s += "<div class=hint>"; s += hint; s += "</div>"; }
+  return s + "</div>";
+}
+
+String check(const char* name, bool on, const char* text) {
+  String s = "<div class=f><label class=chk><input type=checkbox name=";
+  s += name; s += on ? " checked> " : "> "; s += text;
+  return s + "</label></div>";
+}
+
+// Paired/triple inputs each get their own caption, so they can't be confused.
+String pair2(const char* label, const char* hint,
+             const char* ca, const String& ia, const char* cb, const String& ib) {
+  String s = "<div class=f><label>"; s += label; s += "</label><div class=row>";
+  s += "<div><span class=cap>"; s += ca; s += "</span>"; s += ia; s += "</div>";
+  s += "<div><span class=cap>"; s += cb; s += "</span>"; s += ib; s += "</div></div>";
+  if (hint && *hint) { s += "<div class=hint>"; s += hint; s += "</div>"; }
+  return s + "</div>";
+}
+
+String pair3(const char* label, const char* hint,
+             const char* ca, const String& ia, const char* cb, const String& ib,
+             const char* cc, const String& ic) {
+  String s = "<div class=f><label>"; s += label; s += "</label><div class=row>";
+  s += "<div><span class=cap>"; s += ca; s += "</span>"; s += ia; s += "</div>";
+  s += "<div><span class=cap>"; s += cb; s += "</span>"; s += ib; s += "</div>";
+  s += "<div><span class=cap>"; s += cc; s += "</span>"; s += ic; s += "</div></div>";
+  if (hint && *hint) { s += "<div class=hint>"; s += hint; s += "</div>"; }
+  return s + "</div>";
+}
 
 String num(const char* name, long v) {
   char b[96];
@@ -87,92 +155,105 @@ String pageHtml() {
     "<!doctype html><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>stuffy settings</title>"
-    "<style>body{font-family:system-ui;margin:20px;max-width:440px}h1{font-size:20px}"
-    "h2{font-size:13px;letter-spacing:.4px;color:#159b90;margin:22px 0 4px;"
-    "border-bottom:1px solid #eee;padding-bottom:4px}"
-    "label{display:block;margin:10px 0 3px;font-size:13px;color:#444}"
-    "input,select{width:100%;padding:9px;font-size:16px;box-sizing:border-box}"
-    "input[type=checkbox]{width:auto;margin-right:8px}"
-    ".btns{display:flex;gap:10px;margin:22px 0 6px}"
-    "button{flex:1;padding:12px;font-size:15px;border:0;border-radius:6px;color:#fff}"
-    ".save{background:#444}.sync{background:#1d9e75}.s{font-size:12px;color:#777}</style>"
-    "<h1>stuffy settings</h1><form method=POST>";
+    UI_CSS
+    "<div class=wrap><h1>stuffy settings</h1>"
+    "<div class=nav><a href='/history'>History</a><a href='/events'>Event log</a>"
+    "<a href='/update'>Firmware</a></div>"
+    "<form method=POST>";
 
-  h += "<h2>DISPLAY</h2>";
-  h += lbl("Brightness 0-255 (used when auto is off)") + num("bri", c.brightness);
-  h += "<label><input type=checkbox name=autob";
-  h += c.autoBrightness ? " checked>" : ">";
-  h += "auto-brightness (needs lux sensor)</label>";
-  h += lbl("Auto brightness min / max") + num("brmin", c.brightnessMin) + num("brmax", c.brightnessMax);
-  h += lbl("Lux low / high (map to min / max)") + num("luxlo", c.luxLow) + num("luxhi", c.luxHigh);
-  h += lbl("Dimming gamma 0.1, 22=2.2 (higher=dimmer low end)") + num("gam", c.gammaX10);
-  h += lbl("Temperature unit") + "<select name=unit>"
-       + opt("1", unitCur.c_str(), "Fahrenheit") + opt("0", unitCur.c_str(), "Celsius") + "</select>";
-  h += lbl("Temp offset 0.1C, 40=4.0 (after restart)") + num("toff", c.tempOffsetC10);
-  h += lbl("Rotation (applies after restart)") + "<select name=rot>";
-  for (int r = 0; r < 4; r++) { char rv[2] = {char('0' + r), 0}; h += opt(rv, rotCur.c_str(), ROT_LABELS[r]); }
-  h += "</select>";
+  // DISPLAY
+  String disp;
+  disp += fieldH("Fixed brightness", num("bri", c.brightness),
+                 "0\xE2\x80\x93""255, used when auto-brightness is off");
+  disp += check("autob", c.autoBrightness, "Auto-brightness (needs lux sensor)");
+  disp += pair2("Auto brightness range", "",
+                "min (night)", num("brmin", c.brightnessMin),
+                "max (day)",   num("brmax", c.brightnessMax));
+  disp += pair2("Ambient light range", "dimmer below low, brightest above high",
+                "lux low",  num("luxlo", c.luxLow),
+                "lux high", num("luxhi", c.luxHigh));
+  disp += fieldH("Dimming gamma", num("gam", c.gammaX10),
+                 "\xC3\x97""0.1 (22 = 2.2). Higher = gentler low end");
+  disp += fieldH("Temperature unit",
+                 "<select name=unit>" + opt("1", unitCur.c_str(), "Fahrenheit")
+                 + opt("0", unitCur.c_str(), "Celsius") + "</select>");
+  disp += fieldH("Temp offset", num("toff", c.tempOffsetC10),
+                 "\xC3\x97""0.1\xC2\xB0""C (40 = 4.0). Applies after restart");
+  String rotSel = "<select name=rot>";
+  for (int r = 0; r < 4; r++) { char rv[2] = {char('0' + r), 0}; rotSel += opt(rv, rotCur.c_str(), ROT_LABELS[r]); }
+  rotSel += "</select>";
+  disp += fieldH("Rotation", rotSel, "Applies after restart");
+  h += card("Display", disp);
 
-  h += "<h2>AIR QUALITY (ppm ceilings)</h2>";
-  h += lbl("GOOD up to") + num("aqg", c.aqGood);
-  h += lbl("FAIR up to") + num("aqf", c.aqFair);
-  h += lbl("POOR up to (above this = BAD)") + num("aqp", c.aqPoor);
+  // AIR QUALITY
+  h += card("Air quality",
+       pair3("Tier thresholds (ppm)", "above poor = bad",
+             "good \xE2\x89\xA4", num("aqg", c.aqGood),
+             "fair \xE2\x89\xA4", num("aqf", c.aqFair),
+             "poor \xE2\x89\xA4", num("aqp", c.aqPoor)));
 
-  h += "<h2>CALIBRATION</h2>";
-  h += lbl("Fresh-air reference (ppm)") + num("frc", c.frcReferencePpm);
-  h += lbl("Altitude m, sea level (after restart)") + num("alt", c.altitudeM);
-  h += lbl("Location profile") + "<select name=profile>"
-       + opt("0", profCur.c_str(), "Sealed office (ASC off)")
-       + opt("1", profCur.c_str(), "Ventilated (ASC on)") + "</select>";
-  h += lbl("Reminder days: aging / stale / overdue")
-       + num("cala", c.calAgingDays) + num("cals", c.calStaleDays) + num("calo", c.calOverdueDays);
+  // CALIBRATION
+  String cal;
+  cal += fieldH("Fresh-air reference (ppm)", num("frc", c.frcReferencePpm));
+  cal += fieldH("Altitude (m)", num("alt", c.altitudeM),
+                "Above sea level. Applies after restart");
+  cal += fieldH("Location profile",
+                "<select name=profile>" + opt("0", profCur.c_str(), "Sealed office (ASC off)")
+                + opt("1", profCur.c_str(), "Ventilated (ASC on)") + "</select>");
+  cal += pair3("Reminder days", "",
+               "aging",   num("cala", c.calAgingDays),
+               "stale",   num("cals", c.calStaleDays),
+               "overdue", num("calo", c.calOverdueDays));
+  h += card("Calibration", cal);
 
-  h += "<h2>LOGGING</h2>";
-  h += lbl("Log interval (seconds)") + num("logiv", c.logIntervalSec);
-  h += "<div class=s style='margin-top:6px'><a href='/history'>View history graph &rarr;</a>"
-       "&nbsp;&nbsp;<a href='/events'>Event log &rarr;</a></div>";
+  // LOGGING
+  h += card("Logging", fieldH("Log interval (seconds)", num("logiv", c.logIntervalSec)));
 
-  h += "<h2>NETWORK</h2>";
-  h += lbl("Device name (<name>.local + AP)")
-       + "<input name=host autocapitalize=none autocorrect=off spellcheck=false value='"
-       + String(c.hostname) + "'>";
-  h += "<label><input type=checkbox name=sta";
-  h += c.staEnabled ? " checked>" : ">";
-  h += "stay on home WiFi (serve on the LAN)</label>";
-  h += lbl("Web / OTA password (blank keeps current)")
-       + "<input name=webpw type=password autocapitalize=none autocorrect=off "
-         "spellcheck=false placeholder='(set to require login)'>";
-  h += lbl("Repeat password")
-       + "<input name=webpw2 type=password autocapitalize=none autocorrect=off "
-         "spellcheck=false placeholder='(repeat to confirm)'>";
-  h += lbl("WiFi network")
-       + "<input name=ssid autocapitalize=none autocorrect=off autocomplete=off "
-         "spellcheck=false value='" + String(c.wifiSsid) + "'>";
-  h += lbl("WiFi password")
-       + "<input name=pass type=password autocapitalize=none autocorrect=off "
-         "spellcheck=false placeholder='(leave blank to keep)'>";
-  h += lbl("Time zone") + "<select name=tz>";
-  for (auto& o : TZ_OPTIONS) h += opt(o[0], c.timezone, o[1]);
-  h += "</select>";
+  // NETWORK
+  String net;
+  net += fieldH("Device name",
+                "<input name=host autocapitalize=none autocorrect=off spellcheck=false value='"
+                + String(c.hostname) + "'>", "Used for &lt;name&gt;.local and the setup AP");
+  net += check("sta", c.staEnabled, "Stay on home WiFi (serve on the LAN)");
+  net += fieldH("Web / OTA password",
+                "<input name=webpw type=password autocapitalize=none autocorrect=off "
+                "spellcheck=false placeholder='(blank keeps current)'>");
+  net += fieldH("Repeat password",
+                "<input name=webpw2 type=password autocapitalize=none autocorrect=off "
+                "spellcheck=false placeholder='(repeat to confirm)'>");
+  net += fieldH("WiFi network",
+                "<input name=ssid autocapitalize=none autocorrect=off autocomplete=off "
+                "spellcheck=false value='" + String(c.wifiSsid) + "'>");
+  net += fieldH("WiFi password",
+                "<input name=pass type=password autocapitalize=none autocorrect=off "
+                "spellcheck=false placeholder='(leave blank to keep)'>");
+  String tzSel = "<select name=tz>";
+  for (auto& o : TZ_OPTIONS) tzSel += opt(o[0], c.timezone, o[1]);
+  tzSel += "</select>";
+  net += fieldH("Time zone", tzSel);
+  h += card("Network", net);
 
   h += "<div class=btns>"
        "<button class=save formaction=/save>Save</button>"
        "<button class=sync formaction=/sync>Save &amp; sync time</button></div>"
-       "<div class=s>Save stores all settings. Rotation, profile, and home-WiFi apply "
-       "after a restart (button below). Save &amp; sync also sets the clock from NTP. "
-       "<a href='/update'>Firmware update &rarr;</a></div></form>"
-       "<form method=POST action=/restart style='margin-top:16px'>"
-       "<button style='width:100%;padding:11px;border:0;border-radius:6px;"
-       "background:#7a2e2e;color:#fff;font-size:15px'>Restart device</button></form>";
+       "<div class=s style='margin-top:10px'>Display and air-quality changes are live; "
+       "rotation, profile, home-WiFi, altitude, and temp offset apply after a restart. "
+       "Save &amp; sync also sets the clock from NTP.</div></form>"
+       "<form method=POST action=/restart style='margin-top:14px'>"
+       "<button style='width:100%;background:#7a2e2e'>Restart device</button></form>"
+       "</div>";
   return h;
 }
 
 void sendResult(const char* title, const char* detail) {
   String h = "<!doctype html><meta charset=utf-8>"
              "<meta name=viewport content='width=device-width,initial-scale=1'>"
-             "<style>body{font-family:system-ui;margin:24px;max-width:440px}"
-             "a{display:inline-block;margin-top:18px}</style><h1>";
-  h += title; h += "</h1><p>"; h += detail; h += "</p><a href='/'>&larr; back</a>";
+             "<title>stuffy</title>" UI_CSS
+             "<div class=wrap><div class=card><h1 style='margin-top:0'>";
+  h += title;
+  h += "</h1><div class=s style='font-size:14px'>"; h += detail;
+  h += "</div><div style='margin-top:16px'><a href='/'>\xE2\x86\x90 Back to settings</a></div>"
+       "</div></div>";
   server.send(200, "text/html", h);
 }
 

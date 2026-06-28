@@ -740,7 +740,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 16: perceptual auto-brightness (log lux + gamma, 12-bit)\n"));
+  Serial.println(F("Phase 17: web UI redesign (cards + graph restyle/autorange)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
