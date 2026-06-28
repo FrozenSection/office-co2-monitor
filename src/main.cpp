@@ -17,6 +17,7 @@
 #include <Adafruit_VEML7700.h>
 #include <RTClib.h>
 #include <time.h>
+#include <esp_system.h>
 
 #include "config.h"
 #include "version.h"
@@ -44,6 +45,25 @@ static int      gBrightness = 200;      // last applied backlight duty (for diag
 
 static uint16_t gFrcCorr = 0;           // last FRC correction word
 static bool     gFrcOk   = false;
+
+static uint32_t gLastReadMs = 0;        // millis() of last good SCD-41 read
+static bool     gStale      = false;    // no fresh reading for SENSOR_STALE_SEC
+
+// Why an FRC was refused (so the result screen can explain).
+enum FrcFail { FRCF_NONE, FRCF_UNSTABLE, FRCF_IMPLAUSIBLE, FRCF_SENSOR };
+static FrcFail  gFrcFail = FRCF_NONE;
+static uint16_t gFrcLast = 0;           // reading the gate judged
+
+// Ring of CO2 samples taken during equilibration; FRC commits only if these
+// are tight (the air has settled) and plausible for outdoors.
+static uint16_t gEqBuf[8];
+static uint8_t  gEqN = 0, gEqHead = 0;
+static void eqReset() { gEqN = 0; gEqHead = 0; }
+static void eqPush(uint16_t co2) {
+  gEqBuf[gEqHead] = co2;
+  gEqHead = (gEqHead + 1) % 8;
+  if (gEqN < 8) gEqN++;
+}
 
 enum CalState { CAL_UNKNOWN, CAL_FRESH, CAL_AGING, CAL_STALE, CAL_OVERDUE };
 enum AppState { ST_MAIN, ST_CONFIRM, ST_EQUIL, ST_RESULT, ST_WIFI };
@@ -81,6 +101,20 @@ static void scanBus() {
   }
   Serial.printf("  SCD-41 (0x62): %s\n", scd ? "OK" : "MISSING");
   Serial.printf("  DS3231 (0x68): %s\n\n", rtcFound ? "OK" : "MISSING");
+}
+
+static const char* resetReasonStr() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "power-on";
+    case ESP_RST_SW:       return "sw-restart";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_DEEPSLEEP:return "deepsleep";
+    default:               return "other";
+  }
 }
 
 static void logScdError(const char* ctx, int16_t err) {
@@ -153,6 +187,7 @@ static CalState    mLastCal;
 static int         mLastTrend;
 static char        mLastTime[8];
 static char        mLastBot[24];
+static bool        mLastStale;
 
 // Cool-family calibration colors (distinct from the AQ tier ramp).
 static uint16_t calColor(CalState c) {
@@ -233,7 +268,7 @@ static void drawStatusTrend(int cy, uint16_t color, const char* word, int dir) {
 // trend, secondary temp/RH, cool calibration dot (shown only when aging+).
 static void mainScreenEnter() {
   mLastCo2 = 0xFFFF; mLastRing = 0; mLastLabel = nullptr;
-  mLastCal = (CalState)255; mLastTrend = 99;
+  mLastCal = (CalState)255; mLastTrend = 99; mLastStale = false;
   mLastTime[0] = '\0'; mLastBot[0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
   drawCO2(&FreeSans9pt7b, &FreeSans9pt7b, 120, 136, cFaint(), " ppm");
@@ -245,24 +280,28 @@ static void renderMain(uint16_t co2, float tempC, float hum,
                        bool timeValid, int hh, int mm, CalState cal) {
   const char* label;
   uint16_t tier     = co2Color(co2, &label);
-  uint16_t numColor = (cal == CAL_OVERDUE) ? cGrey() : GC9A01A_WHITE;  // grey = untrusted
+  bool     stale    = gStale;
+  // grey = don't trust this number: stale reading, or calibration overdue
+  uint16_t numColor = (stale || cal == CAL_OVERDUE) ? cGrey() : GC9A01A_WHITE;
 
   if (tier != mLastRing) { drawRing(tier); mLastRing = tier; }
 
-  // big white number (ring + status carry the tier color)
-  if (co2 != mLastCo2 || cal != mLastCal) {
+  // big number (ring + status carry the tier color)
+  if (co2 != mLastCo2 || cal != mLastCal || stale != mLastStale) {
     char num[8];
     snprintf(num, sizeof(num), "%u", co2);
     zoneC(&FreeSansBold24pt7b, 120, 102, 180, 44, numColor, num);
     mLastCo2 = co2;
   }
 
-  // status word + trend
-  if (label != mLastLabel || cal != mLastCal || gTrend != mLastTrend) {
-    drawStatusTrend(164, tier, label, gTrend);
+  // status word + trend ("STALE" in amber overrides the tier word)
+  if (label != mLastLabel || cal != mLastCal || gTrend != mLastTrend || stale != mLastStale) {
+    if (stale) drawStatusTrend(164, cOrange(), "STALE", gTrend);
+    else       drawStatusTrend(164, tier, label, gTrend);
     mLastLabel = label;
     mLastTrend = gTrend;
   }
+  mLastStale = stale;
 
   // time
   char ts[8];
@@ -465,14 +504,30 @@ static void drawEquilEnter() {
 static void drawResult() {
   tft.fillScreen(GC9A01A_BLACK);
   if (gFrcOk) {
-    drawTextC(&FreeSansBold12pt7b, 120, 96, GC9A01A_GREEN, "Calibrated");
+    drawTextC(&FreeSansBold12pt7b, 120, 88, GC9A01A_GREEN, "Calibrated");
     char p[20]; snprintf(p, sizeof(p), "%u ppm", settings::cfg.frcReferencePpm);
-    drawTextC(&FreeSans12pt7b, 120, 130, GC9A01A_WHITE, p);
+    drawTextC(&FreeSans12pt7b, 120, 122, GC9A01A_WHITE, p);
     char c[20]; snprintf(c, sizeof(c), "corr %+d", (int)gFrcCorr - 0x8000);
-    drawTextC(&FreeSans9pt7b, 120, 160, cFaint(), c);
+    drawTextC(&FreeSans9pt7b, 120, 150, cFaint(), c);
+    if (!gTimeValid)
+      drawTextC(&FreeSans9pt7b, 120, 176, cOrange(), "clock unset: age n/a");
   } else {
-    drawTextC(&FreeSansBold12pt7b, 120, 108, GC9A01A_RED, "FRC failed");
-    drawTextC(&FreeSans9pt7b, 120, 140, cFaint(), "sensor not ready");
+    const char* l1 = "FRC failed";
+    uint16_t    col = GC9A01A_RED;
+    char        l2[24] = "sensor not ready";
+    switch (gFrcFail) {
+      case FRCF_IMPLAUSIBLE:
+        l1 = "Not fresh air"; col = cOrange();
+        snprintf(l2, sizeof(l2), "%u ppm (indoors?)", gFrcLast); break;
+      case FRCF_UNSTABLE:
+        l1 = "Air not settled"; col = cOrange();
+        snprintf(l2, sizeof(l2), "wait, then retry"); break;
+      case FRCF_SENSOR:
+        l1 = "Sensor error"; snprintf(l2, sizeof(l2), "try again"); break;
+      default: break;
+    }
+    drawTextC(&FreeSansBold12pt7b, 120, 104, col, l1);
+    drawTextC(&FreeSans9pt7b, 120, 140, cFaint(), l2);
   }
 }
 
@@ -518,28 +573,61 @@ static void drawSplash() {
 
 // ---- actions ---------------------------------------------------------------
 
-static void performFRC() {
-  Serial.println(F("FRC: stopping measurement"));
-  scd4x.stopPeriodicMeasurement();
+// Gate the calibration on the equilibration samples, then (if they pass) run the
+// SCD-41 FRC. A bad FRC is worse than none, so refuse implausible or unsettled air.
+static void commitFRC() {
+  gFrcFail = FRCF_NONE;
+  gFrcOk   = false;
+  gFrcLast = gCo2;
+
+  uint16_t mn = 0xFFFF, mx = 0;
+  for (uint8_t i = 0; i < gEqN; i++) {
+    if (gEqBuf[i] < mn) mn = gEqBuf[i];
+    if (gEqBuf[i] > mx) mx = gEqBuf[i];
+  }
+  uint16_t spread = (gEqN > 0) ? (uint16_t)(mx - mn) : 9999;
+
+  // 1) plausibility — did we actually take it to outdoor air?
+  if (gCo2 < FRC_PLAUSIBLE_LO_PPM || gCo2 > FRC_PLAUSIBLE_HI_PPM) {
+    gFrcFail = FRCF_IMPLAUSIBLE;
+    Serial.printf("FRC refused: %u ppm not plausible outdoor air\n", gCo2);
+    datalog::event(gTimeValid ? gNowEpoch : 0, "frc refused: implausible reading");
+    return;
+  }
+  // 2) stability — has the reading settled?
+  if (gEqN < 4 || spread > FRC_STABLE_BAND_PPM) {
+    gFrcFail = FRCF_UNSTABLE;
+    Serial.printf("FRC refused: unstable (spread %u ppm / %u samples)\n", spread, gEqN);
+    datalog::event(gTimeValid ? gNowEpoch : 0, "frc refused: air not settled");
+    return;
+  }
+
+  Serial.println(F("FRC: gate passed, stopping measurement"));
+  logScdError("stop", scd4x.stopPeriodicMeasurement());
   delay(500);
 
   uint16_t corr = 0;
   int16_t err = scd4x.performForcedRecalibration(settings::cfg.frcReferencePpm, corr);
   gFrcCorr = corr;
-  gFrcOk = (err == 0 && corr != 0xFFFF);
+  gFrcOk   = (err == 0 && corr != 0xFFFF);
+  int corrPpm = (corr == 0xFFFF) ? 0 : (int)corr - 0x8000;
   if (err) logScdError("FRC", err);
-  Serial.printf("FRC: target=%u corr=0x%04X (%+d ppm) -> %s\n",
-                settings::cfg.frcReferencePpm, corr,
-                (corr == 0xFFFF) ? 0 : (int)corr - 0x8000,
-                gFrcOk ? "OK" : "FAILED");
+  Serial.printf("FRC: target=%u corr=%+d ppm -> %s\n",
+                settings::cfg.frcReferencePpm, corrPpm, gFrcOk ? "OK" : "FAILED");
+  if (gFrcOk && abs(corrPpm) > 200)
+    Serial.printf("FRC: WARNING unusually large correction (%+d ppm)\n", corrPpm);
 
-  scd4x.startPeriodicMeasurement();
+  logScdError("start", scd4x.startPeriodicMeasurement());
 
-  if (gFrcOk && gTimeValid) {
-    settings::markRecalibrated(gNowEpoch);
-    Serial.println(F("FRC: lastFrcEpoch saved"));
-  } else if (gFrcOk) {
-    Serial.println(F("FRC: ok, but clock unset -> age not tracked yet"));
+  if (gFrcOk) {
+    char ev[48];
+    snprintf(ev, sizeof(ev), "frc ok: ref %u, corr %+d", settings::cfg.frcReferencePpm, corrPpm);
+    datalog::event(gTimeValid ? gNowEpoch : 0, ev);
+    if (gTimeValid) { settings::markRecalibrated(gNowEpoch); Serial.println(F("FRC: age saved")); }
+    else            Serial.println(F("FRC: ok, but clock unset -> age not tracked yet"));
+  } else {
+    gFrcFail = FRCF_SENSOR;
+    datalog::event(gTimeValid ? gNowEpoch : 0, "frc failed: sensor error");
   }
 }
 
@@ -632,7 +720,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 14: sensor compensation + settings validation\n"));
+  Serial.println(F("Phase 15: stale indicator + FRC quality gate + event log\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -690,6 +778,12 @@ void setup() {
   Serial.println(F("button: tap=view, double-tap=recalibrate, hold=wifi\n"));
 
   datalog::begin();
+  {
+    uint32_t bootT = (hasRtc && !rtc.lostPower()) ? rtc.now().unixtime() : 0;
+    char boot[48];
+    snprintf(boot, sizeof(boot), "boot v%s (%s)", FIRMWARE_VERSION, resetReasonStr());
+    datalog::event(bootT, boot);
+  }
 
   // Home-WiFi (STA) background server, if enabled + creds present.
   if (settings::cfg.staEnabled && settings::cfg.wifiSsid[0]) {
@@ -729,6 +823,8 @@ void loop() {
       uint16_t co2 = 0; float t = 0, h = 0;
       if (scd4x.readMeasurement(co2, t, h) == 0 && co2 != 0) {
         gCo2 = co2; gTempC = t; gHum = h;
+        gLastReadMs = now;
+        if (gState == ST_EQUIL) eqPush(co2);   // feed the FRC stability gate
         if (hasLux)
           Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%  lux=%.0f\n", co2, t, h, gLux);
         else
@@ -736,6 +832,10 @@ void loop() {
       }
     }
     refreshTime();
+
+    // Mark the reading stale if the SCD-41 has gone quiet (keep the last value
+    // on screen but greyed, so a frozen number can't read as live).
+    gStale = (gCo2 != 0) && (now - gLastReadMs > (uint32_t)SENSOR_STALE_SEC * 1000UL);
 
     // CO2 trend over a ~2 min window, for the arrow glyph.
     static uint32_t trendT = 0;
@@ -792,6 +892,7 @@ void loop() {
     case ST_CONFIRM:
       if (ev == BTN_TAP) {
         Serial.printf("recal: equilibrating %ds\n", FRC_EQUILIBRATE_SEC);
+        eqReset();
         gState = ST_EQUIL; gStateStart = now; drawEquilEnter();
       } else if (ev == BTN_HOLD || now - gStateStart >= (uint32_t)RECAL_CONFIRM_SEC * 1000) {
         Serial.println(F("recal: confirm canceled"));
@@ -808,7 +909,7 @@ void loop() {
       int elapsed = (int)((now - gStateStart) / 1000);
       int remain  = FRC_EQUILIBRATE_SEC - elapsed;
       if (remain <= 0) {
-        performFRC();
+        commitFRC();
         gState = ST_RESULT; gStateStart = now; drawResult();
       } else if (tick) {
         drawEquilTick(remain);

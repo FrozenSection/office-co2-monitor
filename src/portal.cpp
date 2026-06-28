@@ -107,7 +107,7 @@ String pageHtml() {
   h += lbl("Lux low / high (map to min / max)") + num("luxlo", c.luxLow) + num("luxhi", c.luxHigh);
   h += lbl("Temperature unit") + "<select name=unit>"
        + opt("1", unitCur.c_str(), "Fahrenheit") + opt("0", unitCur.c_str(), "Celsius") + "</select>";
-  h += lbl("Temp offset 0.1C (40 = 4.0)") + num("toff", c.tempOffsetC10);
+  h += lbl("Temp offset 0.1C, 40=4.0 (after restart)") + num("toff", c.tempOffsetC10);
   h += lbl("Rotation (applies after restart)") + "<select name=rot>";
   for (int r = 0; r < 4; r++) { char rv[2] = {char('0' + r), 0}; h += opt(rv, rotCur.c_str(), ROT_LABELS[r]); }
   h += "</select>";
@@ -119,7 +119,7 @@ String pageHtml() {
 
   h += "<h2>CALIBRATION</h2>";
   h += lbl("Fresh-air reference (ppm)") + num("frc", c.frcReferencePpm);
-  h += lbl("Altitude (m above sea level)") + num("alt", c.altitudeM);
+  h += lbl("Altitude m, sea level (after restart)") + num("alt", c.altitudeM);
   h += lbl("Location profile") + "<select name=profile>"
        + opt("0", profCur.c_str(), "Sealed office (ASC off)")
        + opt("1", profCur.c_str(), "Ventilated (ASC on)") + "</select>";
@@ -128,7 +128,8 @@ String pageHtml() {
 
   h += "<h2>LOGGING</h2>";
   h += lbl("Log interval (seconds)") + num("logiv", c.logIntervalSec);
-  h += "<div class=s style='margin-top:6px'><a href='/history'>View history graph &rarr;</a></div>";
+  h += "<div class=s style='margin-top:6px'><a href='/history'>View history graph &rarr;</a>"
+       "&nbsp;&nbsp;<a href='/events'>Event log &rarr;</a></div>";
 
   h += "<h2>NETWORK</h2>";
   h += lbl("Device name (<name>.local + AP)")
@@ -264,7 +265,7 @@ void handleSaveSettings() {
   if (passwordMismatch()) return;
   applyFormToSettings();
   sendResult("Saved", "Settings stored. Display and air-quality changes are live; "
-                      "location profile and home-WiFi apply after a restart.");
+                      "profile, home-WiFi, altitude, and temp offset apply after a restart.");
 }
 
 void handleSync() {
@@ -371,6 +372,14 @@ void handleDataCsv() {
   server.sendContent("");
 }
 
+void handleEvents() {
+  if (!authed()) return;
+  String log = datalog::events();
+  String out = "epoch,event\n";
+  out += log.length() ? log : "(no events logged yet)\n";
+  server.send(200, "text/plain", out);
+}
+
 void setupRoutes() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSaveSettings);
@@ -379,6 +388,7 @@ void setupRoutes() {
   server.on("/history", handleHistory);
   server.on("/data.json", handleDataJson);
   server.on("/data.csv", handleDataCsv);
+  server.on("/events", handleEvents);
   server.onNotFound(handleNotFound);
   ElegantOTA.begin(&server);                 // serves /update with a progress UI
   if (settings::cfg.webPassword[0])

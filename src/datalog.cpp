@@ -6,6 +6,8 @@
 namespace {
   const char*  CUR = "/log.bin";
   const char*  OLD = "/log.old";
+  const char*  EVT = "/events.log";
+  const size_t EVT_MAX = 6000;          // cap the event log; drop oldest wholesale
   const size_t REC = sizeof(datalog::Rec);
   bool         gReady = false;
 
@@ -53,6 +55,31 @@ void datalog::append(uint32_t t, uint16_t co2, float tempC, float rh) {
     f.write((const uint8_t*)&r, REC);
     f.close();
   }
+}
+
+void datalog::event(uint32_t t, const char* msg) {
+  if (!gReady) return;
+  // Keep it bounded: once it grows past the cap, start fresh (events are rare).
+  File chk = LittleFS.open(EVT, "r");
+  if (chk) { size_t sz = chk.size(); chk.close(); if (sz > EVT_MAX) LittleFS.remove(EVT); }
+
+  File f = LittleFS.open(EVT, "a");
+  if (f) {
+    f.printf("%lu,%s\n", (unsigned long)t, msg);
+    f.close();
+  }
+  Serial.printf("event: %s\n", msg);
+}
+
+String datalog::events() {
+  String out;
+  if (!gReady) return out;
+  File f = LittleFS.open(EVT, "r");
+  if (!f) return out;
+  out.reserve(f.size() + 1);
+  while (f.available()) out += (char)f.read();
+  f.close();
+  return out;
 }
 
 void datalog::readAll(std::function<void(const Rec&)> emit) {

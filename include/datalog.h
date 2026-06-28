@@ -18,4 +18,9 @@ namespace datalog {
   void     append(uint32_t t, uint16_t co2, float tempC, float rh);
   uint32_t count();                                   // total records held
   void     readAll(std::function<void(const Rec&)> emit);  // oldest -> newest
+
+  // Human-readable event log (boots, calibrations, sensor faults). Small, capped
+  // text file — one "epoch,message" line per event. t=0 if the clock isn't set.
+  void     event(uint32_t t, const char* msg);
+  String   events();                                  // whole log (for the web UI)
 }
