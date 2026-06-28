@@ -2,6 +2,7 @@
 #include "config.h"
 #include "settings.h"
 #include "datalog.h"
+#include "version.h"
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -24,6 +25,15 @@ char          gHostUrl[40] = "";
 char          gStatus[40]  = "join AP";
 uint32_t      gSyncedEpoch  = 0;
 bool          gSyncedPending = false;
+portal::Telemetry gTelem = {};
+
+String upStr() {
+  uint32_t s = millis() / 1000;
+  char b[16];
+  if (s < 86400) snprintf(b, sizeof(b), "%lu:%02lu", (unsigned long)(s / 3600), (unsigned long)((s % 3600) / 60));
+  else           snprintf(b, sizeof(b), "%lud %luh", (unsigned long)(s / 86400), (unsigned long)((s % 86400) / 3600));
+  return String(b);
+}
 
 const char* TZ_OPTIONS[][2] = {
   {"PST8PDT,M3.2.0,M11.1.0",  "Pacific"},
@@ -65,7 +75,13 @@ const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\
   "a{color:#159b90}" \
   ".stat{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #f0f0ec;font-size:13px}" \
   ".stat:last-child{border-bottom:0}.k{color:#777}.v{color:#222;font-variant-numeric:tabular-nums}" \
-  ".d{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:1px}" \
+  ".d{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:1px;background:#bbb}" \
+  ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}" \
+  "@media(max-width:520px){.grid{grid-template-columns:1fr}}" \
+  ".cardh{font-size:12px;color:#159b90;font-weight:500;margin:0 0 8px}" \
+  ".copy{background:#fff;border:1px solid #d6d6d2;color:#444;width:100%}" \
+  ".danger{background:#fff;border:1px solid #d98a8a;color:#b03030;width:100%}" \
+  "textarea{width:100%;box-sizing:border-box;border:1px solid #d6d6d2;border-radius:8px}" \
   "</style>"
 
 const char* HISTORY_PAGE =
@@ -74,7 +90,7 @@ const char* HISTORY_PAGE =
   "<title>stuffy history</title>"
   UI_CSS
   "<div class=wrap><h1>History</h1>"
-  "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a>"
+  "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
   "<a href='/events'>Event log</a><a href='/data.csv'>Download CSV</a>"
   "<span id=n style='color:#999'></span></div>"
   "<div class=card><canvas id=c height=240></canvas></div></div>"
@@ -157,8 +173,8 @@ String pageHtml() {
     "<title>stuffy settings</title>"
     UI_CSS
     "<div class=wrap><h1>stuffy settings</h1>"
-    "<div class=nav><a href='/history'>History</a><a href='/events'>Event log</a>"
-    "<a href='/update'>Firmware</a></div>"
+    "<div class=nav><a href='/diag'>Diagnostics</a><a href='/history'>History</a>"
+    "<a href='/events'>Event log</a><a href='/update'>Firmware</a></div>"
     "<form method=POST>";
 
   // DISPLAY
@@ -464,6 +480,134 @@ void handleEvents() {
   server.send(200, "text/plain", out);
 }
 
+#define ROW(label,id)  "<div class=stat><span class=k>" label "</span><span class=v id=" id "></span></div>"
+#define ROWD(label,id) "<div class=stat><span class=k>" label "</span><span class=v><i class=d id=" id "D></i><span id=" id "></span></span></div>"
+
+void handleDiag() {
+  if (!authed()) return;
+  String h = "<!doctype html><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>stuffy diagnostics</title>" UI_CSS
+    "<div class=wrap>"
+    "<div style='display:flex;justify-content:space-between;align-items:center'>"
+    "<h1 style='margin:0'>Diagnostics</h1>"
+    "<span class=s style='color:#159b90'>live \xC2\xB7 5s</span></div>"
+    "<div class=nav style='margin-top:10px'><a href='/'>\xE2\x86\x90 Settings</a>"
+    "<a href='/history'>History</a><a href='/events'>Event log</a></div>"
+    "<div class=grid>"
+    "<div class=card><div class=cardh>Sensors</div>"
+      ROW("CO2", "co2") ROW("Temp / RH", "th") ROWD("SCD-41", "scd")
+      ROWD("Clock", "clock") ROW("Light", "light") "</div>"
+    "<div class=card><div class=cardh>Calibration</div>"
+      ROW("Profile", "profile") ROW("Last recal", "recal")
+      ROW("Correction", "corr") ROWD("Confidence", "conf") "</div>"
+    "<div class=card><div class=cardh>Network</div>"
+      ROW("Network", "mode") ROW("IP", "ip") ROW("Signal", "sig")
+      ROW("Host", "host") ROWD("Auth", "auth") "</div>"
+    "<div class=card><div class=cardh>System</div>"
+      ROW("Firmware", "fw") ROW("Uptime", "up")
+      ROW("Free heap", "heap") ROW("Last reset", "reset") "</div>"
+    "</div>"
+    "<div class=card><div class=cardh>Logging</div>"
+      ROW("Records", "recs") ROW("Span", "span")
+      "<button class=danger onclick='wipe()' style='margin-top:10px'>Erase logged data</button>"
+      "</div>"
+    "<button class=copy id=cpb onclick='copyDiag()'>Copy diagnostics</button>"
+    "<textarea id=cp readonly style='display:none;height:170px;margin-top:10px;"
+      "font-family:monospace;font-size:12px;padding:8px'></textarea>"
+    "</div>"
+    "<script>"
+    "function setDot(id,s){var e=document.getElementById(id);if(!e)return;"
+    "e.style.background=s=='ok'?'#3abd6e':s=='warn'?'#e0a52f':s=='bad'?'#d8473d':'#bbb';}"
+    "function paint(d){for(var k in d){var e=document.getElementById(k);if(e)e.textContent=d[k];}"
+    "setDot('scdD',d.scdS);setDot('clockD',d.clockS);setDot('confD',d.confS);setDot('authD',d.authS);}"
+    "function load(){fetch('/diag.json').then(r=>r.json()).then(d=>{window._d=d;paint(d);});}"
+    "load();setInterval(load,5000);"
+    "function copyDiag(){var d=window._d||{};"
+    "var t='stuffy diagnostics\\n'"
+    "+'CO2: '+d.co2+'\\nTemp/RH: '+d.th+'\\nSCD-41: '+d.scd+'\\nClock: '+d.clock+'\\nLight: '+d.light"
+    "+'\\nProfile: '+d.profile+'\\nLast recal: '+d.recal+'\\nCorrection: '+d.corr+'\\nConfidence: '+d.conf"
+    "+'\\nNetwork: '+d.mode+'\\nIP: '+d.ip+'\\nSignal: '+d.sig+'\\nHost: '+d.host+'\\nAuth: '+d.auth"
+    "+'\\nFirmware: '+d.fw+'\\nUptime: '+d.up+'\\nHeap: '+d.heap+'\\nReset: '+d.reset"
+    "+'\\nRecords: '+d.recs+'\\nSpan: '+d.span+'\\n';"
+    "var a=document.getElementById('cp');a.value=t;a.style.display='block';a.select();"
+    "try{document.execCommand('copy');document.getElementById('cpb').textContent='Copied to clipboard';}catch(e){}}"
+    "function wipe(){if(!confirm('Erase all logged history? This cannot be undone.'))return;"
+    "fetch('/wipe',{method:'POST'}).then(()=>load());}"
+    "</script>";
+  server.send(200, "text/html", h);
+}
+
+void handleWipe() {
+  if (!authed()) return;
+  datalog::clear();
+  server.send(200, "text/plain", "ok");
+}
+
+void handleDiagJson() {
+  if (!authed()) return;
+  Settings& c = settings::cfg;
+  portal::Telemetry& t = gTelem;
+  char b[64];
+  String j = "{";
+  auto kv = [&](const char* k, const String& v) { j += '"'; j += k; j += "\":\""; j += v; j += "\","; };
+
+  if (t.co2) { snprintf(b, sizeof(b), "%u ppm", t.co2); kv("co2", b); } else kv("co2", "warming up");
+  { float ts = c.tempUnitF ? t.tempC * 9.0f / 5 + 32 : t.tempC;
+    snprintf(b, sizeof(b), "%.1f %c / %.0f%%", ts, c.tempUnitF ? 'F' : 'C', t.hum); kv("th", b); }
+  if (!t.co2)            { kv("scd", "warming up"); kv("scdS", "warn"); }
+  else if (t.scdStale)   { snprintf(b, sizeof(b), "stale / %lus ago", (unsigned long)t.scdAgeSec); kv("scd", b); kv("scdS", "bad"); }
+  else                   { snprintf(b, sizeof(b), "ok / %lus ago", (unsigned long)t.scdAgeSec); kv("scd", b); kv("scdS", "ok"); }
+  if (!t.hasRtc)         { kv("clock", "RTC absent"); kv("clockS", "bad"); }
+  else if (!t.timeValid) { kv("clock", "time not set"); kv("clockS", "warn"); }
+  else { time_t tt = t.nowEpoch; struct tm lt; localtime_r(&tt, &lt);
+         snprintf(b, sizeof(b), "set / %02d:%02d", lt.tm_hour, lt.tm_min); kv("clock", b); kv("clockS", "ok"); }
+  if (!t.hasLux) snprintf(b, sizeof(b), "no sensor / %d%%", t.brightness * 100 / 255);
+  else           snprintf(b, sizeof(b), "%.0f lx / %d%%", t.lux, t.brightness * 100 / 255);
+  kv("light", b);
+
+  snprintf(b, sizeof(b), "%s / ASC %s", c.profile == PROFILE_VENTILATED ? "ventilated" : "sealed",
+           c.profile == PROFILE_VENTILATED ? "on" : "off"); kv("profile", b);
+  if (t.frcValid) { snprintf(b, sizeof(b), "%+d ppm", t.frcCorrPpm); kv("corr", b); } else kv("corr", "-");
+  if (!t.timeValid || c.lastFrcEpoch == 0) { kv("recal", "never"); kv("conf", "not set"); kv("confS", "warn"); }
+  else {
+    uint32_t days = (t.nowEpoch - c.lastFrcEpoch) / 86400UL;
+    snprintf(b, sizeof(b), "%lu days ago", (unsigned long)days); kv("recal", b);
+    const char *cf, *cs;
+    if (days >= c.calOverdueDays)    { cf = "overdue"; cs = "bad"; }
+    else if (days >= c.calStaleDays) { cf = "stale"; cs = "warn"; }
+    else if (days >= c.calAgingDays) { cf = "aging"; cs = "warn"; }
+    else                             { cf = "fresh"; cs = "ok"; }
+    kv("conf", cf); kv("confS", cs);
+  }
+
+  if (gStaActive)     kv("mode", WiFi.SSID());
+  else if (gApActive) kv("mode", gApSsid);
+  else                kv("mode", "off");
+  kv("ip",   gStaActive ? gStaIp : gApActive ? gApIp : "-");
+  if (gStaActive) { snprintf(b, sizeof(b), "%d dBm", WiFi.RSSI()); kv("sig", b); } else kv("sig", "-");
+  snprintf(b, sizeof(b), "%s.local", c.hostname); kv("host", b);
+  if (c.webPassword[0]) { kv("auth", "on"); kv("authS", "ok"); } else { kv("auth", "off"); kv("authS", "warn"); }
+
+  kv("fw", "v" FIRMWARE_VERSION);
+  kv("up", upStr());
+  snprintf(b, sizeof(b), "%lu KB", (unsigned long)(ESP.getFreeHeap() / 1024)); kv("heap", b);
+  kv("reset", t.resetReason ? t.resetReason : "?");
+
+  snprintf(b, sizeof(b), "%lu / every %us", (unsigned long)datalog::count(), c.logIntervalSec); kv("recs", b);
+  uint32_t o, nw;
+  if (datalog::span(o, nw)) {
+    char d1[16], d2[16]; time_t a = o, z = nw; struct tm la, lz;
+    localtime_r(&a, &la); localtime_r(&z, &lz);
+    strftime(d1, sizeof(d1), "%b %d", &la); strftime(d2, sizeof(d2), "%b %d", &lz);
+    snprintf(b, sizeof(b), "%s -> %s", d1, d2); kv("span", b);
+  } else kv("span", "-");
+
+  if (j.endsWith(",")) j.remove(j.length() - 1);
+  j += "}";
+  server.send(200, "application/json", j);
+}
+
 void setupRoutes() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSaveSettings);
@@ -473,6 +617,9 @@ void setupRoutes() {
   server.on("/data.json", handleDataJson);
   server.on("/data.csv", handleDataCsv);
   server.on("/events", handleEvents);
+  server.on("/diag", handleDiag);
+  server.on("/diag.json", handleDiagJson);
+  server.on("/wipe", HTTP_POST, handleWipe);
   server.onNotFound(handleNotFound);
   ElegantOTA.begin(&server);                 // serves /update with a progress UI
   if (settings::cfg.webPassword[0])
@@ -481,6 +628,8 @@ void setupRoutes() {
 }
 
 }  // namespace
+
+void portal::setTelemetry(const portal::Telemetry& t) { gTelem = t; }
 
 void portal::startAP() {
   snprintf(gApSsid, sizeof(gApSsid), "%s-setup", settings::cfg.hostname);

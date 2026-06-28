@@ -57,6 +57,13 @@ void datalog::append(uint32_t t, uint16_t co2, float tempC, float rh) {
   }
 }
 
+void datalog::clear() {
+  if (!gReady) return;
+  LittleFS.remove(CUR);
+  LittleFS.remove(OLD);
+  Serial.println(F("datalog: logged history erased"));
+}
+
 void datalog::event(uint32_t t, const char* msg) {
   if (!gReady) return;
   // Keep it bounded: once it grows past the cap, start fresh (events are rare).
@@ -80,6 +87,24 @@ String datalog::events() {
   while (f.available()) out += (char)f.read();
   f.close();
   return out;
+}
+
+bool datalog::span(uint32_t& oldest, uint32_t& newest) {
+  if (!gReady) return false;
+  bool got = false;
+  Rec r;
+  for (const char* p : {OLD, CUR}) {           // oldest = first rec of oldest file
+    File f = LittleFS.open(p, "r");
+    if (f && f.size() >= (int)REC) { f.read((uint8_t*)&r, REC); oldest = r.t; f.close(); got = true; break; }
+    if (f) f.close();
+  }
+  if (!got) return false;
+  for (const char* p : {CUR, OLD}) {           // newest = last rec of newest file
+    File f = LittleFS.open(p, "r");
+    if (f && f.size() >= (int)REC) { f.seek(f.size() - REC); f.read((uint8_t*)&r, REC); newest = r.t; f.close(); break; }
+    if (f) f.close();
+  }
+  return true;
 }
 
 void datalog::readAll(std::function<void(const Rec&)> emit) {

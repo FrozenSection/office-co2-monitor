@@ -10,6 +10,19 @@
 namespace portal {
   enum Phase { P_AP, P_CONNECTING, P_SYNCED, P_FAILED };
 
+  // Live device state pushed from the main loop for the /diag page. The portal
+  // owns network/system/logging facts itself; this carries what only main knows.
+  struct Telemetry {
+    uint16_t co2; float tempC; float hum;
+    bool     scdStale; uint32_t scdAgeSec;
+    bool     hasRtc; bool hasLux;
+    bool     timeValid; uint32_t nowEpoch;
+    float    lux; int brightness;     // brightness = perceptual level 0..255
+    bool     frcValid; int frcCorrPpm;
+    const char* resetReason;
+  };
+  void setTelemetry(const Telemetry& t);
+
   void startAP();      // captive AP + DNS + server
   bool startSTA();     // connect home WiFi + mDNS + server + NTP; true if joined
   void handle();       // pump DNS/server; call every loop while active

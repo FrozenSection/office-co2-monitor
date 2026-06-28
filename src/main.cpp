@@ -740,7 +740,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 17: web UI redesign (cards + graph restyle/autorange)\n"));
+  Serial.println(F("Phase 18: web diagnostics page (/diag + live JSON)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -856,6 +856,17 @@ void loop() {
     // Mark the reading stale if the SCD-41 has gone quiet (keep the last value
     // on screen but greyed, so a frozen number can't read as live).
     gStale = (gCo2 != 0) && (now - gLastReadMs > (uint32_t)SENSOR_STALE_SEC * 1000UL);
+
+    // Push live state to the portal for the /diag page.
+    portal::Telemetry tel;
+    tel.co2 = gCo2; tel.tempC = gTempC; tel.hum = gHum;
+    tel.scdStale = gStale; tel.scdAgeSec = gLastReadMs ? (now - gLastReadMs) / 1000UL : 0;
+    tel.hasRtc = hasRtc; tel.hasLux = hasLux;
+    tel.timeValid = gTimeValid; tel.nowEpoch = gNowEpoch;
+    tel.lux = gLux; tel.brightness = gBrightness;
+    tel.frcValid = gFrcOk; tel.frcCorrPpm = gFrcOk ? (int)gFrcCorr - 0x8000 : 0;
+    tel.resetReason = resetReasonStr();
+    portal::setTelemetry(tel);
 
     // CO2 trend over a ~2 min window, for the arrow glyph.
     static uint32_t trendT = 0;

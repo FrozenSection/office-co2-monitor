@@ -17,6 +17,8 @@ namespace datalog {
   bool     begin();                                   // mount LittleFS
   void     append(uint32_t t, uint16_t co2, float tempC, float rh);
   uint32_t count();                                   // total records held
+  bool     span(uint32_t& oldest, uint32_t& newest);  // first/last timestamps; false if empty
+  void     clear();                                   // erase the logged history (not events)
   void     readAll(std::function<void(const Rec&)> emit);  // oldest -> newest
 
   // Human-readable event log (boots, calibrations, sensor faults). Small, capped
