@@ -84,7 +84,7 @@ String pageHtml() {
   h += lbl("Lux low / high (map to min / max)") + num("luxlo", c.luxLow) + num("luxhi", c.luxHigh);
   h += lbl("Temperature unit") + "<select name=unit>"
        + opt("1", unitCur.c_str(), "Fahrenheit") + opt("0", unitCur.c_str(), "Celsius") + "</select>";
-  h += lbl("Rotation (screen orientation)") + "<select name=rot>";
+  h += lbl("Rotation (applies after restart)") + "<select name=rot>";
   for (int r = 0; r < 4; r++) { char rv[2] = {char('0' + r), 0}; h += opt(rv, rotCur.c_str(), ROT_LABELS[r]); }
   h += "</select>";
 
@@ -127,8 +127,8 @@ String pageHtml() {
   h += "<div class=btns>"
        "<button class=save formaction=/save>Save</button>"
        "<button class=sync formaction=/sync>Save &amp; sync time</button></div>"
-       "<div class=s>Save stores all settings (profile + home-WiFi apply after restart). "
-       "Save &amp; sync also sets the clock from NTP. "
+       "<div class=s>Save stores all settings. Rotation, profile, and home-WiFi apply "
+       "after a restart (button below). Save &amp; sync also sets the clock from NTP. "
        "<a href='/update'>Firmware update &rarr;</a></div></form>"
        "<form method=POST action=/restart style='margin-top:16px'>"
        "<button style='width:100%;padding:11px;border:0;border-radius:6px;"
