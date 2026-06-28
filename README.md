@@ -24,6 +24,19 @@ history, and updates.
 - **Data logging** to internal flash with a trend graph + CSV export.
 - **OTA firmware updates** (ElegantOTA), protected by HTTP Basic auth.
 
+## What it measures — and what it doesn't
+
+This is a **ventilation and comfort monitor**. CO₂ is used as a proxy for fresh-air
+turnover: a rising number means the room is accumulating exhaled air and could use
+ventilation. It does **not** measure pathogens, VOCs, particulates, carbon monoxide,
+oxygen level, or any other hazard.
+
+The air-quality tiers (GOOD ≤ 800, FAIR ≤ 1200, POOR ≤ 1500, BAD above — all
+configurable) are comfort/ventilation cues, **not** safety-certification limits. For
+reference, occupational limits for CO₂ are far higher — NIOSH 5,000 ppm TWA,
+30,000 ppm STEL, 40,000 ppm IDLH — and well outside the SCD-41's accurate range. Treat
+this as a "should I open a window / take a walk" indicator, not a life-safety device.
+
 ## Hardware
 
 - Adafruit ESP32 Feather V2
@@ -35,8 +48,14 @@ history, and updates.
 - Optional: VEML7700 lux sensor (auto-brightness), MAX17048 fuel gauge (battery %),
   microSD for extended logging
 
-See [docs/wiring.md](docs/wiring.md) for pinouts and wire colors, and
-[docs/design/](docs/design/) for the display design.
+## Documentation
+
+- [docs/wiring.md](docs/wiring.md) — pinouts and wire colors
+- [docs/calibration.md](docs/calibration.md) — the fresh-air walk, the FRC quality gate,
+  reference value, altitude, and profiles
+- [docs/placement.md](docs/placement.md) — enclosure/placement, thermal notes, and the
+  temperature-offset tuning procedure
+- [docs/design/](docs/design/) — the display design
 
 ## Build & flash
 
