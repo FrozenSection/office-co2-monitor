@@ -47,6 +47,10 @@
 #define TFT_RST_PIN  27   // EYESPI RST  (clean GPIO)
 #define TFT_LITE_PIN 14   // EYESPI Lite — backlight, LEDC PWM for dimming
 
+// Optional microSD (future) shares the display SPI bus; needs MISO (GPIO21,
+// Feather MI) wired + its own chip-select. See docs/wiring.md.
+#define SD_CS_PIN    4    // A5 — microSD chip select (only if SD is added)
+
 // =====================================================================
 // Runtime-settings defaults. These seed the NVS-backed Settings store on
 // first boot (see settings.h); thereafter the saved values win and are

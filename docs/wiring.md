@@ -45,7 +45,8 @@ Pins verified against the Adafruit Feather V2 and EYESPI breakout pinouts.
 | RST        | 27 (top)        | 27   | display reset    | Yellow †   |
 | Lite       | 14 (top)        | 14   | backlight (PWM)  | Blue †     |
 
-(MISO pad: leave unconnected.)
+(MISO pad: unconnected for the display — wired only if you add the optional
+microSD; see below.)
 
 > † Reused color. Yellow is also SCK and blue is also MOSI, but SCK/MO are on the
 > **bottom** header row while RST/Lite are in the **top-row** control cluster
@@ -66,8 +67,29 @@ resistor needed (GPIO25 has internal pull-ups; it is not a strapping/boot pin).
 Polarity is irrelevant for a plain switch — red→A1, black→GND is just the
 factory wiring.
 
+## Optional: microSD logging (future)
+
+The round TFT board has an onboard microSD slot, and the 18-pin ribbon already
+carries the SD's SPI signals to the EYESPI breakout — so adding the card needs
+**only two more wires** from the Feather to the breakout (no ribbon change). The
+SD shares the display's SPI bus (`SCK`/`MO`) and just needs the read line plus its
+own chip-select:
+
+| EYESPI pad | Feather pad | GPIO | Purpose                     |
+| ---------- | ----------- | ---- | --------------------------- |
+| MISO       | MI (bottom) | 21   | SPI data out (SD → Feather) |
+| SDCS       | A5          | 4    | SD chip select              |
+
+- `MISO` is the line the display didn't need (it's write-only); the SD needs it to read.
+- `SDCS` is separate from the display's `TCS`, so the display and SD share `SCK`/`MOSI`/`MISO`
+  and are each picked by their own chip-select. `A5` (GPIO4) is free and not a strapping pin.
+- Firmware would use `SD_CS_PIN 4` over the shared hardware SPI. Until/unless added, data
+  logging lives on internal flash (LittleFS); the SD is the optional upgrade for
+  unlimited / removable (CSV) history.
+
 ## Pins left free / system-reserved (do not solder to)
 
 GPIO22/20 (I2C QT), GPIO5/19/21 (SPI), GPIO0 (NeoPixel), GPIO2 (I2C power rail),
 GPIO13 (red LED), GPIO35 (battery monitor), GPIO38 (onboard SW38 button).
+GPIO4 (A5) is earmarked for the optional microSD chip-select (above).
 Avoid GPIO12 (boot strapping) and the input-only pins (34/36/37/39).
