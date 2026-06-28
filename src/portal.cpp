@@ -129,7 +129,10 @@ String pageHtml() {
        "<button class=sync formaction=/sync>Save &amp; sync time</button></div>"
        "<div class=s>Save stores all settings (profile + home-WiFi apply after restart). "
        "Save &amp; sync also sets the clock from NTP. "
-       "<a href='/update'>Firmware update &rarr;</a></div></form>";
+       "<a href='/update'>Firmware update &rarr;</a></div></form>"
+       "<form method=POST action=/restart style='margin-top:16px'>"
+       "<button style='width:100%;padding:11px;border:0;border-radius:6px;"
+       "background:#7a2e2e;color:#fff;font-size:15px'>Restart device</button></form>";
   return h;
 }
 
@@ -258,6 +261,17 @@ void handleSync() {
   }
 }
 
+void handleRestart() {
+  if (!authed()) return;
+  server.send(200, "text/html",
+              "<!doctype html><meta charset=utf-8>"
+              "<meta http-equiv=refresh content='7;url=/'>"
+              "<body style='font-family:system-ui;margin:24px'>"
+              "<h1>Restarting\xE2\x80\xA6</h1><p>This page returns in a few seconds.</p>");
+  delay(400);
+  ESP.restart();
+}
+
 void handleNotFound() {
   if (gApActive) {   // captive redirect to the portal page
     server.sendHeader("Location", String("http://") + gApIp + "/", true);
@@ -271,6 +285,7 @@ void setupRoutes() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSaveSettings);
   server.on("/sync", HTTP_POST, handleSync);
+  server.on("/restart", HTTP_POST, handleRestart);
   server.onNotFound(handleNotFound);
   ElegantOTA.begin(&server);                 // serves /update with a progress UI
   if (settings::cfg.webPassword[0])
