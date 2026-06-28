@@ -46,10 +46,12 @@ static bool     gFrcOk   = false;
 
 enum CalState { CAL_UNKNOWN, CAL_FRESH, CAL_AGING, CAL_STALE, CAL_OVERDUE };
 enum AppState { ST_MAIN, ST_CONFIRM, ST_EQUIL, ST_RESULT, ST_WIFI };
-enum BtnEv    { BTN_NONE, BTN_TAP, BTN_HOLD };
+enum BtnEv    { BTN_NONE, BTN_TAP, BTN_DBL, BTN_HOLD };
+enum View     { VIEW_CO2, VIEW_TIME, VIEW_DIAG, VIEW_COUNT };
 
 static AppState gState      = ST_MAIN;
 static uint32_t gStateStart = 0;
+static View     gView       = VIEW_CO2;
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -168,6 +170,7 @@ static uint16_t calColor(CalState c) {
 // Draw text centered on (cx,cy) in a GFX font (uses the glyph bounding box).
 static void drawTextC(const GFXfont* f, int cx, int cy, uint16_t color, const char* s) {
   tft.setFont(f);
+  tft.setTextSize(1);   // custom fonts always 1x (modals leave size at 2-5)
   tft.setTextColor(color);
   int16_t x1, y1; uint16_t w, h;
   tft.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
@@ -192,6 +195,7 @@ static void drawTrend(int cx, int cy, int dir, uint16_t color) {
 static void drawStatusTrend(int cy, uint16_t color, const char* word, int dir) {
   tft.fillRect(40, cy - 16, 160, 32, GC9A01A_BLACK);   // narrow: stay inside the ring
   tft.setFont(&FreeSansBold12pt7b);
+  tft.setTextSize(1);
   int16_t x1, y1; uint16_t w, h;
   tft.getTextBounds(word, 0, 0, &x1, &y1, &w, &h);
   const int gap = 11, tri = 13;
@@ -264,6 +268,127 @@ static void renderMain(uint16_t co2, float tempC, float hum,
     if (cal == CAL_AGING || cal == CAL_STALE || cal == CAL_OVERDUE)
       tft.fillCircle(120, 216, 5, calColor(cal));
     mLastCal = cal;
+  }
+}
+
+// ---- time view (clock-prominent) -------------------------------------------
+static uint16_t tLastCo2;
+static char     tLastClock[8];
+static char     tLastBot[24];
+
+static void timeViewEnter() {
+  tLastCo2 = 0xFFFF; tLastClock[0] = '\0'; tLastBot[0] = '\0';
+  tft.fillScreen(GC9A01A_BLACK);
+  for (int r = 115; r <= 118; r++)
+    tft.drawCircle(120, 120, r, tft.color565(0x5A, 0x4E, 0x1E));   // dimmed ring
+  zoneC(&FreeSans9pt7b, 120, 88, 120, 16, cFaint(), "CO2 ppm");
+}
+
+static void renderTimeView() {
+  // small CO2 (tier dot + number) up top
+  if (gCo2 != tLastCo2) {
+    const char* label; uint16_t tier = co2Color(gCo2, &label);
+    tft.fillRect(40, 56, 160, 22, GC9A01A_BLACK);
+    char num[8]; snprintf(num, sizeof(num), "%u", gCo2);
+    tft.setFont(&FreeSans12pt7b);
+    tft.setTextSize(1);
+    int16_t x1, y1; uint16_t w, h;
+    tft.getTextBounds(num, 0, 0, &x1, &y1, &w, &h);
+    const int dot = 10, gap = 8;
+    int x0 = 120 - (dot + gap + (int)w) / 2;
+    tft.fillCircle(x0 + dot / 2, 67, dot / 2, tier);
+    tft.setTextColor(cSec());
+    tft.setCursor(x0 + dot + gap - x1, 67 - h / 2 - y1);
+    tft.print(num);
+    tLastCo2 = gCo2;
+  }
+  // big clock
+  char clk[8];
+  if (gTimeValid) snprintf(clk, sizeof(clk), "%02d:%02d", gHh, gMm);
+  else            strcpy(clk, "--:--");
+  if (strcmp(clk, tLastClock) != 0) {
+    zoneC(&FreeSansBold24pt7b, 120, 124, 200, 48,
+          gTimeValid ? GC9A01A_WHITE : cFaint(), clk);
+    strcpy(tLastClock, clk);
+  }
+  // temp / RH
+  float tShow = settings::cfg.tempUnitF ? (gTempC * 9.0f / 5.0f + 32.0f) : gTempC;
+  char  u = settings::cfg.tempUnitF ? 'F' : 'C';
+  char  bot[24];
+  snprintf(bot, sizeof(bot), "%d%c   %d%%", (int)(tShow + 0.5f), u, (int)(gHum + 0.5f));
+  if (strcmp(bot, tLastBot) != 0) {
+    zoneC(&FreeSans12pt7b, 120, 178, 140, 22, cSec(), bot);
+    strcpy(tLastBot, bot);
+  }
+}
+
+// ---- diagnostics view ------------------------------------------------------
+static uint32_t dLastDraw;
+
+static void diagViewEnter() {
+  dLastDraw = 0;
+  tft.fillScreen(GC9A01A_BLACK);
+  tft.drawCircle(120, 120, 118, tft.color565(0x24, 0x24, 0x24));
+  tft.drawCircle(120, 120, 117, tft.color565(0x24, 0x24, 0x24));
+}
+
+static void renderDiagView() {
+  uint32_t now = millis();
+  if (dLastDraw != 0 && now - dLastDraw < 2000) return;   // refresh ~2s
+  dLastDraw = now;
+  tft.fillRect(28, 62, 184, 124, GC9A01A_BLACK);
+
+  char line[48];
+  const char* label; uint16_t tier = co2Color(gCo2, &label);
+
+  snprintf(line, sizeof(line), "CO2 %u  %s", gCo2, label);
+  drawTextC(&FreeSans9pt7b, 120, 72, tier, line);
+
+  float tShow = settings::cfg.tempUnitF ? (gTempC * 9.0f / 5.0f + 32.0f) : gTempC;
+  char  u = settings::cfg.tempUnitF ? 'F' : 'C';
+  snprintf(line, sizeof(line), "%d%c   %d%% RH", (int)(tShow + 0.5f), u, (int)(gHum + 0.5f));
+  drawTextC(&FreeSans9pt7b, 120, 94, cSec(), line);
+
+  if (hasLux) snprintf(line, sizeof(line), "lux %ld", (long)gLux);
+  else        strcpy(line, "no lux sensor");
+  drawTextC(&FreeSans9pt7b, 120, 116, hasLux ? cSec() : cFaint(), line);
+
+  const char* wf = portal::staActive() ? portal::hostUrl()
+                 : (portal::apActive() ? "AP setup" : "wifi off");
+  drawTextC(&FreeSans9pt7b, 120, 138, cSec(), wf);
+
+  CalState cal = calState(gTimeValid, gNowEpoch);
+  if (cal == CAL_UNKNOWN) strcpy(line, "cal: not set");
+  else {
+    uint32_t days = (gNowEpoch - settings::cfg.lastFrcEpoch) / 86400UL;
+    snprintf(line, sizeof(line), "cal: %ud ago", (unsigned)days);
+  }
+  drawTextC(&FreeSans9pt7b, 120, 160, cSec(), line);
+
+  uint32_t up = millis() / 1000;
+  snprintf(line, sizeof(line), "v%s  up %lu:%02lu", FIRMWARE_VERSION,
+           (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
+  drawTextC(&FreeSans9pt7b, 120, 182, cFaint(), line);
+}
+
+// ---- view dispatch ---------------------------------------------------------
+static void enterView() {
+  switch (gView) {
+    case VIEW_TIME: timeViewEnter(); break;
+    case VIEW_DIAG: diagViewEnter(); break;
+    default:        mainScreenEnter(); break;
+  }
+}
+
+static void renderView() {
+  switch (gView) {
+    case VIEW_TIME: renderTimeView(); break;
+    case VIEW_DIAG: renderDiagView(); break;
+    default:
+      if (gCo2 != 0)
+        renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm,
+                   calState(gTimeValid, gNowEpoch));
+      break;
   }
 }
 
@@ -378,17 +503,17 @@ static void enterMain(uint32_t now) {
   gStateStart = now;
   tft.setRotation(settings::cfg.rotation);            // apply any settings change
   analogWrite(TFT_LITE_PIN, settings::cfg.brightness); // auto-brightness re-takes over if on
-  mainScreenEnter();
-  if (gCo2 != 0)
-    renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm, calState(gTimeValid, gNowEpoch));
+  enterView();
+  renderView();
 }
 
-// Debounced button -> tap (short release) or hold (fires once at BTN_HOLD_MS).
+// Debounced button -> tap / double-tap / hold. A single tap is held back
+// until the double-tap window passes (so it can become a double).
 static BtnEv pollButton() {
-  static bool     pStable = false;   // debounced pressed?
-  static bool     pRaw    = false;
-  static uint32_t lastChange = 0, pressStart = 0;
+  static bool     pStable = false, pRaw = false;
+  static uint32_t lastChange = 0, pressStart = 0, lastRelease = 0;
   static bool     longFired = false;
+  static uint8_t  taps = 0;
   uint32_t now = millis();
 
   bool pressed = (digitalRead(RECAL_BUTTON_PIN) == LOW);
@@ -397,11 +522,19 @@ static BtnEv pollButton() {
   if (now - lastChange >= BTN_DEBOUNCE_MS && pressed != pStable) {
     pStable = pressed;
     if (pStable) { pressStart = now; longFired = false; }
-    else if (!longFired) return BTN_TAP;
+    else if (!longFired) {                 // short release = a tap
+      taps++;
+      lastRelease = now;
+      if (taps >= 2) { taps = 0; return BTN_DBL; }
+    }
   }
   if (pStable && !longFired && (now - pressStart) >= BTN_HOLD_MS) {
-    longFired = true;
+    longFired = true; taps = 0;
     return BTN_HOLD;
+  }
+  if (taps == 1 && !pStable && (now - lastRelease) >= BTN_DBL_MS) {
+    taps = 0;
+    return BTN_TAP;
   }
   return BTN_NONE;
 }
@@ -440,7 +573,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 13: Design 1 display refresh (main view)\n"));
+  Serial.println(F("Phase 13: Design 1 (views + gestures)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -490,7 +623,7 @@ void setup() {
   logScdError("start", scd4x.startPeriodicMeasurement());
   Serial.printf("ASC %s (profile=%u); measuring\n",
                 asc ? "ENABLED" : "disabled", settings::cfg.profile);
-  Serial.println(F("button: tap=recalibrate, hold=wifi\n"));
+  Serial.println(F("button: tap=view, double-tap=recalibrate, hold=wifi\n"));
 
   datalog::begin();
 
@@ -568,7 +701,12 @@ void loop() {
   switch (gState) {
     case ST_MAIN:
       if (ev == BTN_TAP) {
-        Serial.println(F("button: tap -> confirm recalibrate"));
+        gView = (View)((gView + 1) % VIEW_COUNT);
+        Serial.printf("view -> %d\n", (int)gView);
+        enterView();
+        renderView();
+      } else if (ev == BTN_DBL) {
+        Serial.println(F("button: double-tap -> confirm recalibrate"));
         gState = ST_CONFIRM; gStateStart = now; drawConfirm();
       } else if (ev == BTN_HOLD) {
         gState = ST_WIFI; gStateStart = now;
@@ -582,9 +720,8 @@ void loop() {
           Serial.printf("AP up: %s  http://%s/\n", portal::apSsid(), portal::apIp());
           drawWifiAP();
         }
-      } else if (tick && gCo2 != 0) {
-        renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm,
-                   calState(gTimeValid, gNowEpoch));
+      } else if (tick) {
+        renderView();
       }
       break;
 

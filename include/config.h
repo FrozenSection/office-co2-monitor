@@ -24,6 +24,7 @@
 #define RECAL_BUTTON_PIN    25    // A1 — momentary btn to GND, INPUT_PULLUP
 
 #define BTN_DEBOUNCE_MS     25
+#define BTN_DBL_MS          350   // double-tap window
 #define BTN_HOLD_MS         3000  // hold this long -> enter WiFi config
 #define RECAL_CONFIRM_SEC   10    // confirm screen auto-cancels after this
 #define RECAL_RESULT_SEC    6     // result screen dwell before returning
