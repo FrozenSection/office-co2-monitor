@@ -375,7 +375,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 10: home WiFi (STA) + mDNS + OTA\n"));
+  Serial.println(F("Phase 11: ElegantOTA + web auth\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -430,10 +430,13 @@ void setup() {
   // Home-WiFi (STA) background server, if enabled + creds present.
   if (settings::cfg.staEnabled && settings::cfg.wifiSsid[0]) {
     Serial.println(F("WiFi: trying home network..."));
-    if (portal::startSTA())
+    if (portal::startSTA()) {
       Serial.printf("WiFi: connected -> http://%s/  (%s)\n", portal::hostUrl(), portal::staIp());
-    else
+      if (settings::cfg.webPassword[0] == '\0')
+        Serial.println(F("WARNING: web auth disabled — set a Web/OTA password in settings"));
+    } else {
       Serial.println(F("WiFi: home network not reachable"));
+    }
   }
 }
 

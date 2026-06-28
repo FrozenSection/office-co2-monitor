@@ -6,7 +6,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
-#include <Update.h>
+#include <ElegantOTA.h>
 #include <time.h>
 
 namespace {
@@ -35,19 +35,6 @@ const char* TZ_OPTIONS[][2] = {
   {"UTC0",                    "UTC"},
 };
 const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\xB0"};
-
-const char* OTA_FORM =
-  "<!doctype html><meta charset=utf-8>"
-  "<meta name=viewport content='width=device-width,initial-scale=1'>"
-  "<title>firmware</title><style>body{font-family:system-ui;margin:24px;max-width:440px}"
-  "input,button{width:100%;padding:11px;font-size:16px;box-sizing:border-box;margin-top:10px}"
-  "button{background:#1d9e75;color:#fff;border:0;border-radius:6px}</style>"
-  "<h1>Firmware update</h1>"
-  "<form method=POST action=/update enctype='multipart/form-data'>"
-  "<input type=file name=firmware accept='.bin'>"
-  "<button>Upload &amp; flash</button></form>"
-  "<p style='font-size:12px;color:#777'>Upload a PlatformIO .bin. The device reboots when done.</p>"
-  "<a href='/'>&larr; settings</a>";
 
 // --- html builders ---
 String lbl(const char* t) { return "<label>" + String(t) + "</label>"; }
@@ -121,6 +108,12 @@ String pageHtml() {
   h += "<label><input type=checkbox name=sta";
   h += c.staEnabled ? " checked>" : ">";
   h += "stay on home WiFi (serve on the LAN)</label>";
+  h += lbl("Web / OTA password (blank keeps current)")
+       + "<input name=webpw type=password autocapitalize=none autocorrect=off "
+         "spellcheck=false placeholder='(set to require login)'>";
+  h += lbl("Repeat password")
+       + "<input name=webpw2 type=password autocapitalize=none autocorrect=off "
+         "spellcheck=false placeholder='(repeat to confirm)'>";
   h += lbl("WiFi network")
        + "<input name=ssid autocapitalize=none autocorrect=off autocomplete=off "
          "spellcheck=false value='" + String(c.wifiSsid) + "'>";
@@ -174,6 +167,8 @@ void applyFormToSettings() {
   if (server.arg("host").length())
     strlcpy(c.hostname, server.arg("host").c_str(), sizeof(c.hostname));
   c.staEnabled = server.hasArg("sta");
+  String wpw = server.arg("webpw");
+  if (wpw.length()) strlcpy(c.webPassword, wpw.c_str(), sizeof(c.webPassword));
 
   c.brightness     = constrain(server.arg("bri").toInt(), 0, 255);
   c.autoBrightness = server.hasArg("autob");
@@ -194,15 +189,43 @@ void applyFormToSettings() {
   settings::save();
 }
 
-void handleRoot() { server.send(200, "text/html", pageHtml()); }
+// HTTP Basic auth gate. Open when no web password is set.
+bool authed() {
+  if (settings::cfg.webPassword[0] == '\0') return true;
+  if (!server.authenticate("admin", settings::cfg.webPassword)) {
+    server.requestAuthentication();
+    return false;
+  }
+  return true;
+}
+
+// Reject a password change unless both entries match (typo / lockout guard).
+bool passwordMismatch() {
+  String wpw = server.arg("webpw");
+  if (wpw.length() && wpw != server.arg("webpw2")) {
+    sendResult("Passwords don't match",
+               "Nothing was saved. Go back and enter the new password the same way in both fields.");
+    return true;
+  }
+  return false;
+}
+
+void handleRoot() {
+  if (!authed()) return;
+  server.send(200, "text/html", pageHtml());
+}
 
 void handleSaveSettings() {
+  if (!authed()) return;
+  if (passwordMismatch()) return;
   applyFormToSettings();
   sendResult("Saved", "Settings stored. Display and air-quality changes are live; "
                       "location profile and home-WiFi apply after a restart.");
 }
 
 void handleSync() {
+  if (!authed()) return;
+  if (passwordMismatch()) return;
   applyFormToSettings();
 
   // Already on home WiFi -> just NTP.
@@ -244,34 +267,14 @@ void handleNotFound() {
   }
 }
 
-void otaDone() {
-  bool ok = !Update.hasError();
-  server.send(200, "text/html",
-              ok ? "<h1>Updated</h1><p>Rebooting…</p>" : "<h1>Update failed</h1><a href='/update'>retry</a>");
-  delay(800);
-  if (ok) ESP.restart();
-}
-
-void otaUpload() {
-  HTTPUpload& up = server.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    Serial.printf("OTA: receiving %s\n", up.filename.c_str());
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
-  } else if (up.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) Serial.printf("OTA: ok, %u bytes\n", (unsigned)up.totalSize);
-    else                  Update.printError(Serial);
-  }
-}
-
 void setupRoutes() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSaveSettings);
   server.on("/sync", HTTP_POST, handleSync);
-  server.on("/update", HTTP_GET, []() { server.send(200, "text/html", OTA_FORM); });
-  server.on("/update", HTTP_POST, otaDone, otaUpload);
   server.onNotFound(handleNotFound);
+  ElegantOTA.begin(&server);                 // serves /update with a progress UI
+  if (settings::cfg.webPassword[0])
+    ElegantOTA.setAuth("admin", settings::cfg.webPassword);
   server.begin();
 }
 
@@ -313,7 +316,7 @@ bool portal::startSTA() {
 
 void portal::handle() {
   if (gApActive) dns.processNextRequest();
-  if (gApActive || gStaActive) server.handleClient();
+  if (gApActive || gStaActive) { server.handleClient(); ElegantOTA.loop(); }
 }
 
 void portal::stopAP() {
