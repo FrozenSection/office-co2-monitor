@@ -1,56 +1,61 @@
-# office-co2-monitor
+# office-co2-monitor ("stuffy")
 
-A standalone CO2 / time / temp desk monitor for a sealed office with no
-fresh-air supply. Because the room never sees outdoor air, the sensor's
-automatic self-calibration is disabled — instead you periodically take the
-device outside on battery, let it breathe real air, and trigger a forced
-recalibration against a known ~420 ppm reference.
+A standalone CO₂ / time / temperature desk monitor for a sealed office with no
+fresh-air supply. Because the room never sees outdoor air, the sensor's automatic
+self-calibration is disabled — instead you periodically carry the device outside,
+let it breathe real air, and trigger a forced recalibration against a known
+~420 ppm reference.
 
-No WiFi dependency. Reads at a glance.
+Runs fully standalone (no WiFi required); an on-demand web UI handles configuration,
+history, and updates.
+
+## Features
+
+- Live **CO₂ + temperature + humidity** (Sensirion SCD-41) on a 1.28" round display,
+  color-coded by air-quality tier.
+- Button-driven **forced recalibration** with a guided equilibration countdown — the
+  "fresh-air walk" — since ASC is disabled for a sealed room.
+- **Calibration-confidence** cue that escalates with time since the last recal, and
+  greys the reading when it's overdue rather than showing it as trustworthy.
+- **Battery-backed real-time clock** (DS3231), NTP-synced when online.
+- **Ambient-light auto-brightness** (optional VEML7700).
+- **On-demand web config** — a captive AP for first setup, plus an optional always-on
+  page at `http://<name>.local` when connected to home WiFi.
+- **Data logging** to internal flash with a trend graph + CSV export.
+- **OTA firmware updates** (ElegantOTA), protected by HTTP Basic auth.
 
 ## Hardware
 
 - Adafruit ESP32 Feather V2
-- Adafruit SCD-41 (CO2 / temp / humidity, STEMMA QT)
-- DS3231 RTC (battery-backed, STEMMA QT)
-- 1.28" round TFT (GC9A01, 240x240) via EYESPI breakout + 18-pin FPC
-- 500 mAh LiPo (USB-powered at the desk; battery covers the walk)
-- Momentary button for the recalibration trigger
+- Adafruit SCD-41 (CO₂ / temp / humidity, STEMMA QT)
+- DS3231 RTC (coin-cell-backed, STEMMA QT)
+- 1.28" round TFT (GC9A01, 240×240) via EYESPI breakout + 18-pin FPC
+- Momentary button (recalibration / menu)
+- LiPo battery (USB-powered at the desk; battery covers the recalibration walk)
+- Optional: VEML7700 lux sensor (auto-brightness), MAX17048 fuel gauge (battery %),
+  microSD for extended logging
 
-See [docs/wiring.md](docs/wiring.md) for the bus layout and pinout.
+See [docs/wiring.md](docs/wiring.md) for pinouts and wire colors, and
+[docs/design/](docs/design/) for the display design.
 
-## Design decisions
-
-- **Power:** USB-powered desk display; battery is only for the fresh-air
-  walk, so no deep-sleep complexity.
-- **Calibration:** automatic self-calibration (ASC) **off**; forced
-  recalibration (FRC) on demand via a button + guided equilibration flow.
-- **Calibration confidence:** the display tracks days since the last FRC
-  and escalates a status cue (fresh → aging → stale → overdue). At
-  "overdue" the CO2 reading is greyed and marked unverified rather than
-  shown as if trustworthy.
-- **Firmware:** PlatformIO + Arduino framework.
-
-## Status
-
-Phase 1 — I2C bring-up. `src/main.cpp` powers the STEMMA QT rail, scans the
-bus, and confirms the SCD-41 (`0x62`) and DS3231 (`0x68`) respond.
-
-### Roadmap
-
-1. **Bring-up** — I2C power + scan ← *current*
-2. Display hello (GC9A01 drawing)
-3. SCD-41 read → serial
-4. RTC set + read
-5. Integrate round UI
-6. Disable ASC, wire button, FRC + on-screen feedback
-7. Temperature offset tuning (in enclosure)
-8. Enclosure (H2D)
-
-## Build
+## Build & flash
 
 ```
 pio run                 # compile
-pio run -t upload       # flash
+pio run -t upload       # flash over USB
 pio device monitor      # serial @ 115200
 ```
+
+After the first USB flash, updates can go over the air at `http://<name>.local/update`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Development
+
+This firmware was developed with [Claude](https://claude.com/claude-code) (Anthropic)
+as a coding assistant, working from the author's direction and input: the author chose
+the hardware, did all wiring and on-device testing, and made the design and engineering
+decisions; Claude wrote and iterated the code accordingly. The display mockups were also
+generated with Claude. Commits carry a `Co-Authored-By: Claude` trailer.
