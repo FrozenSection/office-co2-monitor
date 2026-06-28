@@ -8,7 +8,7 @@ Settings cfg;
 
 static Preferences prefs;
 static const char* NS = "co2cfg";
-static const uint16_t SCHEMA_VERSION = 6;
+static const uint16_t SCHEMA_VERSION = 7;
 
 static void loadDefaults(Settings& c) {
   c.frcReferencePpm = FRC_REFERENCE_PPM;
@@ -46,6 +46,7 @@ static void loadDefaults(Settings& c) {
   c.logIntervalSec = DEFAULT_LOG_INTERVAL_SEC;
   c.altitudeM      = DEFAULT_ALTITUDE_M;
   c.tempOffsetC10  = DEFAULT_TEMP_OFFSET_C10;
+  c.gammaX10       = DEFAULT_GAMMA_X10;
 }
 
 void settings::begin() {
@@ -62,6 +63,12 @@ void settings::begin() {
   } else {
     Serial.println(F("settings: seeded defaults"));
   }
+  // Heal values that can't be valid. A newly-appended field can fall into the
+  // struct's tail padding without growing sizeof(Settings) — then the partial
+  // load above doesn't see it as "new" and reads back the old padding (e.g. 0).
+  // Range-check such fields so they fall back to defaults instead of garbage.
+  if (cfg.gammaX10 < 10 || cfg.gammaX10 > 30) cfg.gammaX10 = DEFAULT_GAMMA_X10;
+
   // Rewrite in the current size so the next boot is a clean full load.
   prefs.putUShort("ver", SCHEMA_VERSION);
   prefs.putBytes("blob", &cfg, sizeof(Settings));

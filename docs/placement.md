@@ -13,6 +13,20 @@ The SCD-41 should sample the room's air, not the device's own microclimate:
 - Give it a **stable supply** — brownouts show up in the event log as `brownout` resets
   and can disturb the sensor and flash.
 
+## Lux sensor window (optional VEML7700)
+
+If the unit auto-dims, the lux sensor needs to see the room:
+
+- Put a thin **window** over the VEML7700 — a couple of layers of clear/transparent
+  filament is enough; only *relative* light matters, and the lux endpoints are tuned to
+  the as-built window anyway.
+- **Shield it from the display's own backlight glow** so the screen doesn't brighten
+  itself in a feedback loop. Keep the sensor close to its window and walled off from
+  internal light bleed.
+
+The dimming behavior and how to tune the lux endpoints/gamma to that window are covered
+in [brightness.md](brightness.md).
+
 ## Temperature / humidity offset
 
 The SCD-41 measures temperature at its own die, which sits warmer than the room because

@@ -55,6 +55,8 @@ this as a "should I open a window / take a walk" indicator, not a life-safety de
   reference value, altitude, and profiles
 - [docs/placement.md](docs/placement.md) — enclosure/placement, thermal notes, and the
   temperature-offset tuning procedure
+- [docs/brightness.md](docs/brightness.md) — fixed vs. auto-dimming, the log+gamma model,
+  and per-environment tuning
 - [docs/design/](docs/design/) — the display design
 
 ## Build & flash

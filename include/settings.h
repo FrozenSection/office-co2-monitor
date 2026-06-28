@@ -52,6 +52,7 @@ struct Settings {
   uint16_t logIntervalSec;    // data-log sample period
   uint16_t altitudeM;         // SCD-41 altitude compensation (m)
   uint16_t tempOffsetC10;     // SCD-41 temperature offset (degC * 10)
+  uint8_t  gammaX10;          // auto-brightness dimming gamma * 10
 };
 // NOTE: only ever APPEND fields (settings::begin migrates by partial load).
 

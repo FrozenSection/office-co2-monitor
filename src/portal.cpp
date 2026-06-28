@@ -105,6 +105,7 @@ String pageHtml() {
   h += "auto-brightness (needs lux sensor)</label>";
   h += lbl("Auto brightness min / max") + num("brmin", c.brightnessMin) + num("brmax", c.brightnessMax);
   h += lbl("Lux low / high (map to min / max)") + num("luxlo", c.luxLow) + num("luxhi", c.luxHigh);
+  h += lbl("Dimming gamma 0.1, 22=2.2 (higher=dimmer low end)") + num("gam", c.gammaX10);
   h += lbl("Temperature unit") + "<select name=unit>"
        + opt("1", unitCur.c_str(), "Fahrenheit") + opt("0", unitCur.c_str(), "Celsius") + "</select>";
   h += lbl("Temp offset 0.1C, 40=4.0 (after restart)") + num("toff", c.tempOffsetC10);
@@ -222,6 +223,7 @@ void applyFormToSettings() {
   c.calOverdueDays = constrain(server.arg("calo").toInt(), 1, 3650);
   c.altitudeM      = constrain(server.arg("alt").toInt(), 0, 9000);
   c.tempOffsetC10  = constrain(server.arg("toff").toInt(), 0, 200);
+  c.gammaX10       = constrain(server.arg("gam").toInt(), 10, 30);
 
   // enforce ordering / sane relationships so labels can't contradict
   if (c.aqFair <= c.aqGood)               c.aqFair = c.aqGood + 1;
@@ -229,6 +231,7 @@ void applyFormToSettings() {
   if (c.calStaleDays <= c.calAgingDays)   c.calStaleDays = c.calAgingDays + 1;
   if (c.calOverdueDays <= c.calStaleDays) c.calOverdueDays = c.calStaleDays + 1;
   if (c.brightnessMax < c.brightnessMin)  c.brightnessMax = c.brightnessMin;
+  if (c.luxLow < 1)                       c.luxLow = 1;   // log map needs >= 1
   if (c.luxHigh <= c.luxLow)              c.luxHigh = c.luxLow + 1;
 
   settings::save();

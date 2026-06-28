@@ -84,11 +84,18 @@
 #define FRC_PLAUSIBLE_HI_PPM     600
 #define SENSOR_STALE_SEC         30    // no good read for this long -> mark stale
 
-// Auto-brightness (active only when a VEML7700 is detected). Lux below
-// DEFAULT_LUX_LOW maps to BRIGHT_MIN, lux above DEFAULT_LUX_HIGH to BRIGHT_MAX.
-// Tune the lux endpoints to your enclosure window after it's printed.
+// Auto-brightness (active only when a VEML7700 is detected). Lux maps to a
+// 0..1 position LOGARITHMICALLY (lux spans decades), then to a perceptual
+// brightness between BRIGHT_MIN/MAX, then to PWM duty through a GAMMA curve so
+// the low end dims smoothly. Tune the lux endpoints to your enclosure window.
 #define DEFAULT_AUTO_BRIGHTNESS true
-#define DEFAULT_BRIGHT_MIN  15     // night floor (never fully dark)
-#define DEFAULT_BRIGHT_MAX  255    // bright-room ceiling
-#define DEFAULT_LUX_LOW     8      // lux at/below this -> min brightness
-#define DEFAULT_LUX_HIGH    300    // lux at/above this -> max brightness
+#define DEFAULT_BRIGHT_MIN  15     // night floor (perceptual 0..255; never fully dark)
+#define DEFAULT_BRIGHT_MAX  255    // bright-room ceiling (perceptual)
+#define DEFAULT_LUX_LOW     3      // lux at/below this -> min brightness (>=1 for log)
+#define DEFAULT_LUX_HIGH    400    // lux at/above this -> max brightness
+#define DEFAULT_GAMMA_X10   22     // perceptual dimming gamma * 10 (2.2)
+
+// Backlight PWM (LEDC). 12-bit so the gamma'd low end resolves smoothly.
+#define BL_PWM_FREQ  10000   // Hz (no visible/audible artifacts)
+#define BL_PWM_BITS  12
+#define BL_PWM_MAX   4095    // (1 << BL_PWM_BITS) - 1

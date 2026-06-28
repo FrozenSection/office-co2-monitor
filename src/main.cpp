@@ -82,6 +82,17 @@ static inline uint16_t cSec()    { return tft.color565(0xB8, 0xBD, 0xC4); }  // 
 static inline uint16_t cFaint()  { return tft.color565(0x8A, 0x8F, 0x96); }  // faint label
 static inline uint16_t cBlue()   { return tft.color565(0x3E, 0x8B, 0xF0); }  // calibration blue
 
+// Backlight: map a PERCEPTUAL level (0..255) to PWM duty through a gamma curve,
+// so equal level steps look like equal brightness steps and the low end dims
+// smoothly. 12-bit LEDC gives the gamma'd floor enough distinct levels.
+static void setBacklight(int level) {
+  if (level < 0) level = 0; else if (level > 255) level = 255;
+  float g = settings::cfg.gammaX10 / 10.0f;
+  uint32_t duty = (uint32_t)(powf(level / 255.0f, g) * BL_PWM_MAX + 0.5f);
+  if (level > 0 && duty == 0) duty = 1;     // never fully dark when level > 0
+  ledcWrite(TFT_LITE_PIN, duty);
+}
+
 static void enableI2CPower() {
   pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
   digitalWrite(NEOPIXEL_I2C_POWER, HIGH);
@@ -648,7 +659,7 @@ static void enterMain(uint32_t now) {
   gState = ST_MAIN;
   gStateStart = now;
   tft.setRotation(settings::cfg.rotation);            // apply any settings change
-  analogWrite(TFT_LITE_PIN, settings::cfg.brightness); // auto-brightness re-takes over if on
+  setBacklight(settings::cfg.brightness);             // auto-brightness re-takes over if on
   enterView();
   renderView();
 }
@@ -688,7 +699,7 @@ static BtnEv pollButton() {
 static void updateLuxAndBrightness() {
   static uint32_t last = 0;
   static float    ema  = -1;
-  static int      applied = -1;
+  static float    level = -1;           // current perceptual level (0..255), slewed
   if (!hasLux) return;
   if (gState == ST_WIFI) return;        // keep the QR screen at full brightness
   if (millis() - last < 400) return;
@@ -701,17 +712,26 @@ static void updateLuxAndBrightness() {
   }
   if (!settings::cfg.autoBrightness) return;
 
-  float lo = settings::cfg.luxLow, hi = settings::cfg.luxHigh;
-  float t = (hi > lo) ? (gLux - lo) / (hi - lo) : 1.0f;
-  if (t < 0) t = 0; else if (t > 1) t = 1;
-  int target = settings::cfg.brightnessMin +
-               (int)(t * (settings::cfg.brightnessMax - settings::cfg.brightnessMin));
+  // Lux -> 0..1 position on a LOG axis (lux spans decades, so equal ratios feel
+  // equal). Below luxLow sits at the floor; above luxHigh at the ceiling.
+  float lo = max((float)settings::cfg.luxLow, 1.0f);
+  float hi = max((float)settings::cfg.luxHigh, lo + 1.0f);
+  float l  = (gLux < 0.01f) ? 0.01f : gLux;
+  float p  = (logf(l) - logf(lo)) / (logf(hi) - logf(lo));
+  if (p < 0) p = 0; else if (p > 1) p = 1;
 
-  if (applied < 0) applied = target;
-  if      (applied < target) applied += min(8, target - applied);
-  else if (applied > target) applied -= min(8, applied - target);
-  analogWrite(TFT_LITE_PIN, applied);
-  gBrightness = applied;
+  // Perceptual target between the min/max endpoints; setBacklight() applies gamma.
+  float target = settings::cfg.brightnessMin +
+                 p * (settings::cfg.brightnessMax - settings::cfg.brightnessMin);
+
+  // Slew in PERCEPTUAL space so fades feel even from dim to bright.
+  if (level < 0) level = target;
+  float step = 6.0f;
+  if      (level < target) level += fminf(step, target - level);
+  else if (level > target) level -= fminf(step, level - target);
+
+  setBacklight((int)(level + 0.5f));
+  gBrightness = (int)(level + 0.5f);    // perceptual level, for the diag readout
 }
 
 // ---- lifecycle ------------------------------------------------------------
@@ -720,15 +740,15 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 15: stale indicator + FRC quality gate + event log\n"));
+  Serial.println(F("Phase 16: perceptual auto-brightness (log lux + gamma, 12-bit)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
   tzset();
   pinMode(RECAL_BUTTON_PIN, INPUT_PULLUP);
 
-  pinMode(TFT_LITE_PIN, OUTPUT);
-  analogWrite(TFT_LITE_PIN, settings::cfg.brightness);
+  ledcAttach(TFT_LITE_PIN, BL_PWM_FREQ, BL_PWM_BITS);
+  setBacklight(settings::cfg.brightness);
   tft.begin();
   tft.setRotation(settings::cfg.rotation);
   drawSplash();
@@ -879,7 +899,7 @@ void loop() {
           drawWifiSTA();
         } else {                              // off-network -> captive AP + QR
           Serial.println(F("button: hold -> wifi config AP"));
-          analogWrite(TFT_LITE_PIN, 255);     // full bright so the QR scans well
+          setBacklight(255);                  // full bright so the QR scans well
           portal::startAP();
           Serial.printf("AP up: %s  http://%s/\n", portal::apSsid(), portal::apIp());
           drawWifiAP();
