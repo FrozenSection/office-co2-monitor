@@ -107,6 +107,7 @@ String pageHtml() {
   h += lbl("Lux low / high (map to min / max)") + num("luxlo", c.luxLow) + num("luxhi", c.luxHigh);
   h += lbl("Temperature unit") + "<select name=unit>"
        + opt("1", unitCur.c_str(), "Fahrenheit") + opt("0", unitCur.c_str(), "Celsius") + "</select>";
+  h += lbl("Temp offset 0.1C (40 = 4.0)") + num("toff", c.tempOffsetC10);
   h += lbl("Rotation (applies after restart)") + "<select name=rot>";
   for (int r = 0; r < 4; r++) { char rv[2] = {char('0' + r), 0}; h += opt(rv, rotCur.c_str(), ROT_LABELS[r]); }
   h += "</select>";
@@ -118,6 +119,7 @@ String pageHtml() {
 
   h += "<h2>CALIBRATION</h2>";
   h += lbl("Fresh-air reference (ppm)") + num("frc", c.frcReferencePpm);
+  h += lbl("Altitude (m above sea level)") + num("alt", c.altitudeM);
   h += lbl("Location profile") + "<select name=profile>"
        + opt("0", profCur.c_str(), "Sealed office (ASC off)")
        + opt("1", profCur.c_str(), "Ventilated (ASC on)") + "</select>";
@@ -217,6 +219,17 @@ void applyFormToSettings() {
   c.calAgingDays   = constrain(server.arg("cala").toInt(), 1, 3650);
   c.calStaleDays   = constrain(server.arg("cals").toInt(), 1, 3650);
   c.calOverdueDays = constrain(server.arg("calo").toInt(), 1, 3650);
+  c.altitudeM      = constrain(server.arg("alt").toInt(), 0, 9000);
+  c.tempOffsetC10  = constrain(server.arg("toff").toInt(), 0, 200);
+
+  // enforce ordering / sane relationships so labels can't contradict
+  if (c.aqFair <= c.aqGood)               c.aqFair = c.aqGood + 1;
+  if (c.aqPoor <= c.aqFair)               c.aqPoor = c.aqFair + 1;
+  if (c.calStaleDays <= c.calAgingDays)   c.calStaleDays = c.calAgingDays + 1;
+  if (c.calOverdueDays <= c.calStaleDays) c.calOverdueDays = c.calStaleDays + 1;
+  if (c.brightnessMax < c.brightnessMin)  c.brightnessMax = c.brightnessMin;
+  if (c.luxHigh <= c.luxLow)              c.luxHigh = c.luxLow + 1;
+
   settings::save();
 }
 

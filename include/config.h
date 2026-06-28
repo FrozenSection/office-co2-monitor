@@ -74,6 +74,16 @@
 #define LOG_MAX_RECS_PER_FILE    8000  // ~72KB/file; 2 files -> ~16k records
 #define LOG_GRAPH_MAX_POINTS     600   // downsample the chart to this many
 
+// SCD-41 compensation
+#define DEFAULT_ALTITUDE_M       0     // meters above sea level
+#define DEFAULT_TEMP_OFFSET_C10  40    // temperature offset, degC*10 (SCD default 4.0)
+
+// Forced-recalibration quality gate (the "fresh air walk")
+#define FRC_STABLE_BAND_PPM      30    // max spread over the last samples to commit
+#define FRC_PLAUSIBLE_LO_PPM     250   // outdoor reading must be within this range
+#define FRC_PLAUSIBLE_HI_PPM     600
+#define SENSOR_STALE_SEC         30    // no good read for this long -> mark stale
+
 // Auto-brightness (active only when a VEML7700 is detected). Lux below
 // DEFAULT_LUX_LOW maps to BRIGHT_MIN, lux above DEFAULT_LUX_HIGH to BRIGHT_MAX.
 // Tune the lux endpoints to your enclosure window after it's printed.

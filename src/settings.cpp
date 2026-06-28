@@ -8,7 +8,7 @@ Settings cfg;
 
 static Preferences prefs;
 static const char* NS = "co2cfg";
-static const uint16_t SCHEMA_VERSION = 5;
+static const uint16_t SCHEMA_VERSION = 6;
 
 static void loadDefaults(Settings& c) {
   c.frcReferencePpm = FRC_REFERENCE_PPM;
@@ -44,6 +44,8 @@ static void loadDefaults(Settings& c) {
   c.staEnabled = DEFAULT_STA_ENABLED;
   c.webPassword[0] = '\0';
   c.logIntervalSec = DEFAULT_LOG_INTERVAL_SEC;
+  c.altitudeM      = DEFAULT_ALTITUDE_M;
+  c.tempOffsetC10  = DEFAULT_TEMP_OFFSET_C10;
 }
 
 void settings::begin() {

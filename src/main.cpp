@@ -632,7 +632,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 13: Design 1 (modals + splash)\n"));
+  Serial.println(F("Phase 14: sensor compensation + settings validation\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -678,6 +678,9 @@ void setup() {
     Serial.printf("SCD-41 serial: 0x%llX\n", (unsigned long long)serial);
   else
     Serial.println(F("SCD-41 not responding — check the QT chain"));
+
+  logScdError("altitude", scd4x.setSensorAltitude(settings::cfg.altitudeM));
+  logScdError("temp offset", scd4x.setTemperatureOffset(settings::cfg.tempOffsetC10 / 10.0f));
 
   bool asc = settings::ascEnabled();
   logScdError("set ASC", scd4x.setAutomaticSelfCalibrationEnabled(asc ? 1 : 0));
