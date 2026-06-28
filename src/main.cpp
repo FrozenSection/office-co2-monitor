@@ -9,6 +9,10 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_GC9A01A.h>
+#include <Fonts/FreeSansBold24pt7b.h>
+#include <Fonts/FreeSansBold12pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans9pt7b.h>
 #include <SensirionI2cScd4x.h>
 #include <Adafruit_VEML7700.h>
 #include <RTClib.h>
@@ -35,6 +39,7 @@ static float    gTempC = 0, gHum = 0;
 static bool     gTimeValid = false;     // RTC has a valid (set) time
 static int      gHh = 0, gMm = 0;
 static uint32_t gNowEpoch = 0;
+static int      gTrend = 0;             // CO2 trend: -1 falling, 0 flat, +1 rising
 
 static uint16_t gFrcCorr = 0;           // last FRC correction word
 static bool     gFrcOk   = false;
@@ -50,6 +55,8 @@ static uint32_t gStateStart = 0;
 
 static inline uint16_t cGrey()   { return tft.color565(130, 130, 130); }
 static inline uint16_t cOrange() { return tft.color565(255, 140, 0); }
+static inline uint16_t cSec()    { return tft.color565(0xB8, 0xBD, 0xC4); }  // secondary
+static inline uint16_t cFaint()  { return tft.color565(0x8A, 0x8F, 0x96); }  // faint label
 
 static void enableI2CPower() {
   pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
@@ -100,6 +107,7 @@ static CalState calState(bool timeValid, uint32_t nowEpoch) {
 // their max content and kept inside the ring (r112) so updates never erase it.
 static void drawZone(int cy, int boxW, int boxH, uint8_t size,
                      uint16_t color, const char* s) {
+  tft.setFont(nullptr);   // built-in font for modal / WiFi screens
   tft.fillRect(120 - boxW / 2, cy - boxH / 2, boxW, boxH, GC9A01A_BLACK);
   if (!s || !*s) return;
   int w = (int)strlen(s) * 6 * size;
@@ -142,63 +150,119 @@ static uint16_t    mLastCo2;
 static uint16_t    mLastRing;
 static const char* mLastLabel;
 static CalState    mLastCal;
+static int         mLastTrend;
 static char        mLastTime[8];
-static char        mLastBot[20];
+static char        mLastBot[24];
 
+// Cool-family calibration colors (distinct from the AQ tier ramp).
+static uint16_t calColor(CalState c) {
+  switch (c) {
+    case CAL_FRESH:   return tft.color565(0x2B, 0xD4, 0xC4);
+    case CAL_AGING:   return tft.color565(0x3E, 0x8B, 0xF0);
+    case CAL_STALE:   return tft.color565(0x7A, 0x6C, 0xF0);
+    case CAL_OVERDUE: return tft.color565(0xB0, 0x5C, 0xF0);
+    default:          return 0;
+  }
+}
+
+// Draw text centered on (cx,cy) in a GFX font (uses the glyph bounding box).
+static void drawTextC(const GFXfont* f, int cx, int cy, uint16_t color, const char* s) {
+  tft.setFont(f);
+  tft.setTextColor(color);
+  int16_t x1, y1; uint16_t w, h;
+  tft.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor(cx - w / 2 - x1, cy - h / 2 - y1);
+  tft.print(s);
+}
+
+static void zoneC(const GFXfont* f, int cx, int cy, int boxW, int boxH,
+                  uint16_t color, const char* s) {
+  tft.fillRect(cx - boxW / 2, cy - boxH / 2, boxW, boxH, GC9A01A_BLACK);
+  if (s && *s) drawTextC(f, cx, cy, color, s);
+}
+
+// Trend glyph: up triangle / down triangle / flat dash.
+static void drawTrend(int cx, int cy, int dir, uint16_t color) {
+  if (dir > 0)      tft.fillTriangle(cx, cy - 6, cx - 6, cy + 5, cx + 6, cy + 5, color);
+  else if (dir < 0) tft.fillTriangle(cx, cy + 6, cx - 6, cy - 5, cx + 6, cy - 5, color);
+  else              tft.fillRect(cx - 6, cy - 2, 12, 4, color);
+}
+
+// Status word + trend glyph, centered as a group.
+static void drawStatusTrend(int cy, uint16_t color, const char* word, int dir) {
+  tft.fillRect(40, cy - 16, 160, 32, GC9A01A_BLACK);   // narrow: stay inside the ring
+  tft.setFont(&FreeSansBold12pt7b);
+  int16_t x1, y1; uint16_t w, h;
+  tft.getTextBounds(word, 0, 0, &x1, &y1, &w, &h);
+  const int gap = 11, tri = 13;
+  int x0 = 120 - ((int)w + gap + tri) / 2;
+  tft.setTextColor(color);
+  tft.setCursor(x0 - x1, cy - h / 2 - y1);
+  tft.print(word);
+  // trend is NEUTRAL (grey) — direction only; the tier color carries quality
+  drawTrend(x0 + (int)w + gap + tri / 2, cy, dir, cSec());
+}
+
+// Design 1 "Aperture": tier ring, white number, faint label, colored status +
+// trend, secondary temp/RH, cool calibration dot (shown only when aging+).
 static void mainScreenEnter() {
   mLastCo2 = 0xFFFF; mLastRing = 0; mLastLabel = nullptr;
-  mLastCal = (CalState)255; mLastTime[0] = '\0'; mLastBot[0] = '\0';
+  mLastCal = (CalState)255; mLastTrend = 99;
+  mLastTime[0] = '\0'; mLastBot[0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
-  drawZone(152, 48, 18, 2, cGrey(), "ppm");
-  drawZone(110, 128, 46, 2, GC9A01A_WHITE, "warming up");
-  drawZone(36, 72, 20, 2, cGrey(), "--:--");
+  zoneC(&FreeSans9pt7b,  120, 136, 120, 18, cFaint(),       "CO2 ppm");
+  zoneC(&FreeSans12pt7b, 120, 102, 200, 26, GC9A01A_WHITE,  "warming up");
+  zoneC(&FreeSans12pt7b, 120,  48,  90, 24, cFaint(),       "--:--");
 }
 
 static void renderMain(uint16_t co2, float tempC, float hum,
                        bool timeValid, int hh, int mm, CalState cal) {
   const char* label;
   uint16_t tier     = co2Color(co2, &label);
-  uint16_t numColor = (cal == CAL_OVERDUE) ? cGrey() : tier;  // grey = untrusted
+  uint16_t numColor = (cal == CAL_OVERDUE) ? cGrey() : GC9A01A_WHITE;  // grey = untrusted
 
   if (tier != mLastRing) { drawRing(tier); mLastRing = tier; }
 
-  if (co2 != mLastCo2 || label != mLastLabel || cal != mLastCal) {
-    drawZone(70, 60, 22, 2, numColor, label);
+  // big white number (ring + status carry the tier color)
+  if (co2 != mLastCo2 || cal != mLastCal) {
     char num[8];
     snprintf(num, sizeof(num), "%u", co2);
-    drawZone(110, 128, 46, 5, numColor, num);
+    zoneC(&FreeSansBold24pt7b, 120, 102, 180, 44, numColor, num);
     mLastCo2 = co2;
-    mLastLabel = label;
   }
 
+  // status word + trend
+  if (label != mLastLabel || cal != mLastCal || gTrend != mLastTrend) {
+    drawStatusTrend(164, tier, label, gTrend);
+    mLastLabel = label;
+    mLastTrend = gTrend;
+  }
+
+  // time
   char ts[8];
   if (timeValid) snprintf(ts, sizeof(ts), "%02d:%02d", hh, mm);
   else           strcpy(ts, "--:--");
   if (strcmp(ts, mLastTime) != 0) {
-    drawZone(36, 72, 20, 2, timeValid ? GC9A01A_WHITE : cGrey(), ts);
+    zoneC(&FreeSans12pt7b, 120, 48, 90, 24, timeValid ? cSec() : cFaint(), ts);
     strcpy(mLastTime, ts);
   }
 
+  // temp + humidity
   float tShow = settings::cfg.tempUnitF ? (tempC * 9.0f / 5.0f + 32.0f) : tempC;
   char  tUnit = settings::cfg.tempUnitF ? 'F' : 'C';
-  char  bot[20];
-  snprintf(bot, sizeof(bot), "%d%c  %d%%",
+  char  bot[24];
+  snprintf(bot, sizeof(bot), "%d%c   %d%%",
            (int)(tShow + 0.5f), tUnit, (int)(hum + 0.5f));
   if (strcmp(bot, mLastBot) != 0) {
-    drawZone(176, 128, 20, 2, GC9A01A_WHITE, bot);
+    zoneC(&FreeSans12pt7b, 120, 191, 140, 22, cSec(), bot);
     strcpy(mLastBot, bot);
   }
 
+  // calibration dot — cool color, hidden unless aging+
   if (cal != mLastCal) {
-    const char* msg = nullptr;
-    uint16_t    c   = GC9A01A_YELLOW;
-    switch (cal) {
-      case CAL_AGING:   msg = "check cal";        c = GC9A01A_YELLOW; break;
-      case CAL_STALE:   msg = "recalibrate soon"; c = cOrange();      break;
-      case CAL_OVERDUE: msg = "recal overdue";    c = GC9A01A_RED;    break;
-      default: break;   // FRESH / UNKNOWN -> stay hidden
-    }
-    drawZone(198, 104, 16, 1, c, msg ? msg : "");
+    tft.fillRect(112, 208, 16, 16, GC9A01A_BLACK);
+    if (cal == CAL_AGING || cal == CAL_STALE || cal == CAL_OVERDUE)
+      tft.fillCircle(120, 216, 5, calColor(cal));
     mLastCal = cal;
   }
 }
@@ -376,7 +440,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 12: data logging + history graph\n"));
+  Serial.println(F("Phase 13: Design 1 display refresh (main view)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -475,6 +539,18 @@ void loop() {
       }
     }
     refreshTime();
+
+    // CO2 trend over a ~2 min window, for the arrow glyph.
+    static uint32_t trendT = 0;
+    static uint16_t trendRef = 0;
+    if (gCo2 != 0) {
+      if (trendRef == 0) { trendRef = gCo2; trendT = now; }
+      else if (now - trendT >= 120000) {
+        gTrend = (gCo2 > trendRef + 20) ? 1 : (gCo2 < trendRef - 20 ? -1 : 0);
+        trendRef = gCo2;
+        trendT = now;
+      }
+    }
 
     // Periodic data log — needs a fresh reading and a real (RTC) clock.
     static uint32_t lastLog = 0;
