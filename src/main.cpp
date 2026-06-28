@@ -59,6 +59,7 @@ static inline uint16_t cGrey()   { return tft.color565(130, 130, 130); }
 static inline uint16_t cOrange() { return tft.color565(255, 140, 0); }
 static inline uint16_t cSec()    { return tft.color565(0xB8, 0xBD, 0xC4); }  // secondary
 static inline uint16_t cFaint()  { return tft.color565(0x8A, 0x8F, 0x96); }  // faint label
+static inline uint16_t cBlue()   { return tft.color565(0x3E, 0x8B, 0xF0); }  // calibration blue
 
 static void enableI2CPower() {
   pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
@@ -105,22 +106,18 @@ static CalState calState(bool timeValid, uint32_t nowEpoch) {
   return CAL_FRESH;
 }
 
-// Clear a centered box and draw centered text. Boxes are sized per zone to
-// their max content and kept inside the ring (r112) so updates never erase it.
-static void drawZone(int cy, int boxW, int boxH, uint8_t size,
-                     uint16_t color, const char* s) {
-  tft.setFont(nullptr);   // built-in font for modal / WiFi screens
-  tft.fillRect(120 - boxW / 2, cy - boxH / 2, boxW, boxH, GC9A01A_BLACK);
-  if (!s || !*s) return;
-  int w = (int)strlen(s) * 6 * size;
-  tft.setTextSize(size);
-  tft.setTextColor(color);
-  tft.setCursor(120 - w / 2, cy - (8 * size) / 2);
-  tft.print(s);
-}
-
 static void drawRing(uint16_t color) {
   for (int r = 112; r <= 119; r++) tft.drawCircle(120, 120, r, color);
+}
+
+// Fill an annular sector (degrees; 0 = 12 o'clock, clockwise) with radial lines.
+static void fillArc(int cx, int cy, int rIn, int rOut, float a0, float a1, uint16_t color) {
+  for (float a = a0; a <= a1; a += 0.5f) {
+    float rad = (a - 90.0f) * 0.01745329f;
+    float c = cosf(rad), s = sinf(rad);
+    tft.drawLine(cx + (int)(rIn * c), cy + (int)(rIn * s),
+                 cx + (int)(rOut * c), cy + (int)(rOut * s), color);
+  }
 }
 
 // Render a QR code centered on the display: white quiet-zone square with black
@@ -396,40 +393,43 @@ static void renderView() {
 
 static void drawConfirm() {
   tft.fillScreen(GC9A01A_BLACK);
-  drawZone(60, 200, 24, 2, GC9A01A_WHITE, "Recalibrate");
-  drawZone(110, 200, 24, 2, GC9A01A_GREEN, "tap = yes");
-  drawZone(150, 200, 24, 2, cOrange(), "hold = cancel");
+  drawTextC(&FreeSansBold12pt7b, 120, 84, GC9A01A_WHITE, "Recalibrate?");
+  drawTextC(&FreeSans12pt7b, 120, 126, GC9A01A_GREEN, "tap = yes");
+  drawTextC(&FreeSans12pt7b, 120, 158, cOrange(), "hold = cancel");
 }
 
 static void drawEquilTick(int remain) {
-  char t[8];
-  snprintf(t, sizeof(t), "%d:%02d", remain / 60, remain % 60);
-  drawZone(102, 150, 40, 4, GC9A01A_WHITE, t);
-  char p[16];
-  snprintf(p, sizeof(p), "%u ppm", gCo2);
-  drawZone(146, 180, 20, 2, cGrey(), p);
+  // cool-blue progress ring fills as equilibration proceeds
+  float prog = 1.0f - (float)remain / (float)FRC_EQUILIBRATE_SEC;
+  if (prog < 0) prog = 0; else if (prog > 1) prog = 1;
+  fillArc(120, 120, 110, 118, 0, prog * 360.0f, cBlue());
+  // ppm up top, countdown down low (RECALIBRATING splits them, drawn on enter)
+  char num[8]; snprintf(num, sizeof(num), "%u", gCo2);
+  zoneC(&FreeSansBold24pt7b, 120, 76, 150, 40, GC9A01A_WHITE, num);
+  char t[8]; snprintf(t, sizeof(t), "%d:%02d", remain / 60, remain % 60);
+  zoneC(&FreeSans12pt7b, 120, 160, 100, 22, cSec(), t);
 }
 
 static void drawEquilEnter() {
   tft.fillScreen(GC9A01A_BLACK);
-  drawZone(42, 180, 20, 2, GC9A01A_WHITE, "fresh air");
-  drawZone(192, 220, 16, 1, cOrange(), "hold = cancel");
+  fillArc(120, 120, 110, 118, 0, 360, tft.color565(0x1C, 0x1C, 0x1C));   // track
+  drawTextC(&FreeSans9pt7b, 120, 106, cFaint(), "ppm");
+  drawTextC(&FreeSansBold12pt7b, 120, 132, cBlue(), "RECALIBRATING");
+  drawTextC(&FreeSans9pt7b, 120, 190, cFaint(), "hold to cancel");
   drawEquilTick(FRC_EQUILIBRATE_SEC);
 }
 
 static void drawResult() {
   tft.fillScreen(GC9A01A_BLACK);
   if (gFrcOk) {
-    drawZone(85, 220, 30, 3, GC9A01A_GREEN, "Calibrated");
-    char p[20];
-    snprintf(p, sizeof(p), "%u ppm", settings::cfg.frcReferencePpm);
-    drawZone(130, 200, 24, 2, GC9A01A_WHITE, p);
-    char c[20];
-    snprintf(c, sizeof(c), "corr %+d", (int)gFrcCorr - 0x8000);
-    drawZone(165, 200, 16, 1, cGrey(), c);
+    drawTextC(&FreeSansBold12pt7b, 120, 96, GC9A01A_GREEN, "Calibrated");
+    char p[20]; snprintf(p, sizeof(p), "%u ppm", settings::cfg.frcReferencePpm);
+    drawTextC(&FreeSans12pt7b, 120, 130, GC9A01A_WHITE, p);
+    char c[20]; snprintf(c, sizeof(c), "corr %+d", (int)gFrcCorr - 0x8000);
+    drawTextC(&FreeSans9pt7b, 120, 160, cFaint(), c);
   } else {
-    drawZone(95, 220, 30, 2, GC9A01A_RED, "FRC failed");
-    drawZone(135, 220, 16, 1, cGrey(), "sensor not ready");
+    drawTextC(&FreeSansBold12pt7b, 120, 108, GC9A01A_RED, "FRC failed");
+    drawTextC(&FreeSans9pt7b, 120, 140, cFaint(), "sensor not ready");
   }
 }
 
@@ -437,7 +437,8 @@ static void drawWifiStatus() {
   uint16_t c = (portal::phase() == portal::P_SYNCED) ? GC9A01A_GREEN
              : (portal::phase() == portal::P_FAILED) ? GC9A01A_RED
                                                      : cOrange();
-  drawZone(26, 150, 16, 1, c, portal::statusLine());
+  tft.fillRect(40, 22, 160, 22, GC9A01A_BLACK);
+  drawTextC(&FreeSans9pt7b, 120, 32, c, portal::statusLine());
 }
 
 static void drawWifiAP() {
@@ -446,16 +447,30 @@ static void drawWifiAP() {
   char wifi[80];
   snprintf(wifi, sizeof(wifi), "WIFI:T:nopass;S:%s;;", portal::apSsid());
   drawQR(wifi);                              // scan with phone camera to join
-  drawZone(214, 150, 16, 1, cGrey(), "tap to exit");
+  drawTextC(&FreeSans9pt7b, 120, 214, cFaint(), "tap to exit");
 }
 
 static void drawWifiSTA() {
   tft.fillScreen(GC9A01A_BLACK);
-  drawZone(58, 220, 20, 2, GC9A01A_GREEN, "home wifi");
-  drawZone(92, 230, 14, 1, cGrey(), "browse to:");
-  drawZone(114, 230, 16, 1, GC9A01A_CYAN, portal::hostUrl());
-  drawZone(138, 230, 16, 1, GC9A01A_CYAN, portal::staIp());
-  drawZone(198, 220, 14, 1, cGrey(), "tap to exit");
+  char ssid[24];
+  if (strlen(settings::cfg.wifiSsid) > 16)
+    snprintf(ssid, sizeof(ssid), "%.13s...", settings::cfg.wifiSsid);  // truncate long
+  else
+    snprintf(ssid, sizeof(ssid), "%s", settings::cfg.wifiSsid);
+  drawTextC(&FreeSans12pt7b, 120, 60, GC9A01A_GREEN, ssid[0] ? ssid : "home wifi");
+  drawTextC(&FreeSans9pt7b, 120, 92, cFaint(), "browse to:");
+  drawTextC(&FreeSans12pt7b, 120, 116, GC9A01A_CYAN, portal::hostUrl());
+  drawTextC(&FreeSans12pt7b, 120, 142, GC9A01A_CYAN, portal::staIp());
+  drawTextC(&FreeSans9pt7b, 120, 198, cFaint(), "tap to exit");
+}
+
+static void drawSplash() {
+  tft.fillScreen(GC9A01A_BLACK);
+  tft.drawCircle(120, 92, 22, GC9A01A_GREEN);
+  tft.drawCircle(120, 92, 21, GC9A01A_GREEN);
+  tft.fillCircle(120, 92, 8, GC9A01A_GREEN);
+  drawTextC(&FreeSansBold12pt7b, 120, 142, GC9A01A_WHITE, "CO2 Monitor");
+  drawTextC(&FreeSans9pt7b, 120, 168, cFaint(), "v" FIRMWARE_VERSION);
 }
 
 // ---- actions ---------------------------------------------------------------
@@ -573,7 +588,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 13: Design 1 (views + gestures)\n"));
+  Serial.println(F("Phase 13: Design 1 (modals + splash)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -584,6 +599,8 @@ void setup() {
   analogWrite(TFT_LITE_PIN, settings::cfg.brightness);
   tft.begin();
   tft.setRotation(settings::cfg.rotation);
+  drawSplash();
+  delay(1300);
   mainScreenEnter();
 
   enableI2CPower();
