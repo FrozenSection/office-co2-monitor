@@ -22,6 +22,7 @@ namespace portal {
   const char* apIp();
   const char* hostUrl();   // "<hostname>.local"
   const char* staIp();
+  int         rssi();      // STA signal (dBm), 0 if not connected
 
   Phase       phase();
   const char* statusLine();

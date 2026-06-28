@@ -430,6 +430,7 @@ const char*   portal::apSsid()    { return gApSsid; }
 const char*   portal::apIp()      { return gApIp; }
 const char*   portal::hostUrl()   { return gHostUrl; }
 const char*   portal::staIp()     { return gStaIp; }
+int           portal::rssi()      { return gStaActive ? WiFi.RSSI() : 0; }
 portal::Phase portal::phase()     { return gPhase; }
 const char*   portal::statusLine(){ return gStatus; }
 

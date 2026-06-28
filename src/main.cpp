@@ -40,6 +40,7 @@ static bool     gTimeValid = false;     // RTC has a valid (set) time
 static int      gHh = 0, gMm = 0;
 static uint32_t gNowEpoch = 0;
 static int      gTrend = 0;             // CO2 trend: -1 falling, 0 flat, +1 rising
+static int      gBrightness = 200;      // last applied backlight duty (for diag)
 
 static uint16_t gFrcCorr = 0;           // last FRC correction word
 static bool     gFrcOk   = false;
@@ -181,6 +182,30 @@ static void zoneC(const GFXfont* f, int cx, int cy, int boxW, int boxH,
   if (s && *s) drawTextC(f, cx, cy, color, s);
 }
 
+// Draw "CO2"+suffix centered at (cx,cy) with the 2 subscripted (smaller, lower).
+static void drawCO2(const GFXfont* mf, const GFXfont* sf, int cx, int cy,
+                    uint16_t color, const char* suffix) {
+  int16_t x1, y1; uint16_t wCO, h;
+  tft.setFont(mf); tft.setTextSize(1);
+  tft.getTextBounds("CO", 0, 0, &x1, &y1, &wCO, &h);
+  int16_t s1, s2; uint16_t w2, h2;
+  tft.setFont(sf);
+  tft.getTextBounds("2", 0, 0, &s1, &s2, &w2, &h2);
+  uint16_t wSuf = 0;
+  if (suffix && *suffix) {
+    int16_t a, b; uint16_t hh;
+    tft.setFont(mf); tft.getTextBounds(suffix, 0, 0, &a, &b, &wSuf, &hh);
+  }
+  int baseY = cy - y1 - (int)h / 2;
+  int x0 = cx - ((int)wCO + (int)w2 + (int)wSuf) / 2;
+  tft.setTextColor(color);
+  tft.setFont(mf); tft.setCursor(x0, baseY);                         tft.print("CO");
+  tft.setFont(sf); tft.setCursor(tft.getCursorX(), baseY + (int)h / 4); tft.print("2");
+  if (suffix && *suffix) {
+    tft.setFont(mf); tft.setCursor(tft.getCursorX(), baseY);         tft.print(suffix);
+  }
+}
+
 // Trend glyph: up triangle / down triangle / flat dash.
 static void drawTrend(int cx, int cy, int dir, uint16_t color) {
   if (dir > 0)      tft.fillTriangle(cx, cy - 6, cx - 6, cy + 5, cx + 6, cy + 5, color);
@@ -211,7 +236,7 @@ static void mainScreenEnter() {
   mLastCal = (CalState)255; mLastTrend = 99;
   mLastTime[0] = '\0'; mLastBot[0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
-  zoneC(&FreeSans9pt7b,  120, 136, 120, 18, cFaint(),       "CO2 ppm");
+  drawCO2(&FreeSans9pt7b, &FreeSans9pt7b, 120, 136, cFaint(), " ppm");
   zoneC(&FreeSans12pt7b, 120, 102, 200, 26, GC9A01A_WHITE,  "warming up");
   zoneC(&FreeSans12pt7b, 120,  48,  90, 24, cFaint(),       "--:--");
 }
@@ -278,7 +303,7 @@ static void timeViewEnter() {
   tft.fillScreen(GC9A01A_BLACK);
   for (int r = 115; r <= 118; r++)
     tft.drawCircle(120, 120, r, tft.color565(0x5A, 0x4E, 0x1E));   // dimmed ring
-  zoneC(&FreeSans9pt7b, 120, 88, 120, 16, cFaint(), "CO2 ppm");
+  drawCO2(&FreeSans9pt7b, &FreeSans9pt7b, 120, 88, cFaint(), " ppm");
 }
 
 static void renderTimeView() {
@@ -320,52 +345,70 @@ static void renderTimeView() {
 }
 
 // ---- diagnostics view ------------------------------------------------------
-static uint32_t dLastDraw;
+static char dLastRow[7][24];
 
 static void diagViewEnter() {
-  dLastDraw = 0;
+  for (int i = 0; i < 7; i++) dLastRow[i][0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
-  tft.drawCircle(120, 120, 118, tft.color565(0x24, 0x24, 0x24));
-  tft.drawCircle(120, 120, 117, tft.color565(0x24, 0x24, 0x24));
+  tft.drawCircle(120, 120, 118, tft.color565(0x46, 0x46, 0x46));   // brighter neutral ring
+  tft.drawCircle(120, 120, 117, tft.color565(0x46, 0x46, 0x46));
+}
+
+// Per-row change detection: only repaint a row whose value changed (no blink).
+static void diagRow(int idx, int cy, uint16_t color, const char* s) {
+  if (strcmp(s, dLastRow[idx]) == 0) return;
+  strncpy(dLastRow[idx], s, sizeof(dLastRow[idx]) - 1);
+  dLastRow[idx][sizeof(dLastRow[idx]) - 1] = '\0';
+  tft.fillRect(36, cy - 12, 168, 24, GC9A01A_BLACK);
+  drawTextC(&FreeSans9pt7b, 120, cy, color, s);
 }
 
 static void renderDiagView() {
-  uint32_t now = millis();
-  if (dLastDraw != 0 && now - dLastDraw < 2000) return;   // refresh ~2s
-  dLastDraw = now;
-  tft.fillRect(28, 62, 184, 124, GC9A01A_BLACK);
+  char line[40];
+  uint32_t up = millis() / 1000;
 
-  char line[48];
-  const char* label; uint16_t tier = co2Color(gCo2, &label);
+  // network
+  if (portal::staActive())     diagRow(0, 60, GC9A01A_CYAN, portal::staIp());
+  else if (portal::apActive()) diagRow(0, 60, cOrange(), "AP setup mode");
+  else                         diagRow(0, 60, cFaint(), "wifi off");
 
-  snprintf(line, sizeof(line), "CO2 %u  %s", gCo2, label);
-  drawTextC(&FreeSans9pt7b, 120, 72, tier, line);
+  if (portal::staActive()) {
+    snprintf(line, sizeof(line), "rssi %d dBm", portal::rssi());
+    diagRow(1, 82, cSec(), line);
+  } else {
+    snprintf(line, sizeof(line), "%s.local", settings::cfg.hostname);
+    diagRow(1, 82, cFaint(), line);
+  }
 
-  float tShow = settings::cfg.tempUnitF ? (gTempC * 9.0f / 5.0f + 32.0f) : gTempC;
-  char  u = settings::cfg.tempUnitF ? 'F' : 'C';
-  snprintf(line, sizeof(line), "%d%c   %d%% RH", (int)(tShow + 0.5f), u, (int)(gHum + 0.5f));
-  drawTextC(&FreeSans9pt7b, 120, 94, cSec(), line);
+  // sensors detected
+  snprintf(line, sizeof(line), "scd41%s%s", hasRtc ? " rtc" : "", hasLux ? " lux" : "");
+  diagRow(2, 104, cSec(), line);
 
-  if (hasLux) snprintf(line, sizeof(line), "lux %ld", (long)gLux);
-  else        strcpy(line, "no lux sensor");
-  drawTextC(&FreeSans9pt7b, 120, 116, hasLux ? cSec() : cFaint(), line);
+  // identity (middle)
+  if (up < 86400) snprintf(line, sizeof(line), "v%s  up %lu:%02lu", FIRMWARE_VERSION,
+                           (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
+  else            snprintf(line, sizeof(line), "v%s  up %lud %luh", FIRMWARE_VERSION,
+                           (unsigned long)(up / 86400), (unsigned long)((up % 86400) / 3600));
+  diagRow(3, 126, GC9A01A_WHITE, line);
 
-  const char* wf = portal::staActive() ? portal::hostUrl()
-                 : (portal::apActive() ? "AP setup" : "wifi off");
-  drawTextC(&FreeSans9pt7b, 120, 138, cSec(), wf);
+  // lux + brightness
+  int br = (hasLux && settings::cfg.autoBrightness) ? gBrightness : settings::cfg.brightness;
+  if (hasLux) snprintf(line, sizeof(line), "lux %ld   br %d%%", (long)gLux, br * 100 / 255);
+  else        snprintf(line, sizeof(line), "br %d%%", br * 100 / 255);
+  diagRow(4, 148, cSec(), line);
 
+  // calibration
   CalState cal = calState(gTimeValid, gNowEpoch);
   if (cal == CAL_UNKNOWN) strcpy(line, "cal: not set");
   else {
     uint32_t days = (gNowEpoch - settings::cfg.lastFrcEpoch) / 86400UL;
     snprintf(line, sizeof(line), "cal: %ud ago", (unsigned)days);
   }
-  drawTextC(&FreeSans9pt7b, 120, 160, cSec(), line);
+  diagRow(5, 170, cSec(), line);
 
-  uint32_t up = millis() / 1000;
-  snprintf(line, sizeof(line), "v%s  up %lu:%02lu", FIRMWARE_VERSION,
-           (unsigned long)(up / 3600), (unsigned long)((up % 3600) / 60));
-  drawTextC(&FreeSans9pt7b, 120, 182, cFaint(), line);
+  // free heap
+  snprintf(line, sizeof(line), "heap %luk", (unsigned long)(ESP.getFreeHeap() / 1024));
+  diagRow(6, 190, cFaint(), line);
 }
 
 // ---- view dispatch ---------------------------------------------------------
@@ -469,7 +512,7 @@ static void drawSplash() {
   tft.drawCircle(120, 92, 22, GC9A01A_GREEN);
   tft.drawCircle(120, 92, 21, GC9A01A_GREEN);
   tft.fillCircle(120, 92, 8, GC9A01A_GREEN);
-  drawTextC(&FreeSansBold12pt7b, 120, 142, GC9A01A_WHITE, "CO2 Monitor");
+  drawCO2(&FreeSansBold12pt7b, &FreeSans9pt7b, 120, 142, GC9A01A_WHITE, " Monitor");
   drawTextC(&FreeSans9pt7b, 120, 168, cFaint(), "v" FIRMWARE_VERSION);
 }
 
@@ -580,6 +623,7 @@ static void updateLuxAndBrightness() {
   if      (applied < target) applied += min(8, target - applied);
   else if (applied > target) applied -= min(8, applied - target);
   analogWrite(TFT_LITE_PIN, applied);
+  gBrightness = applied;
 }
 
 // ---- lifecycle ------------------------------------------------------------
