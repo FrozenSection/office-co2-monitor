@@ -302,6 +302,8 @@ static void refreshTime() {
 static void enterMain(uint32_t now) {
   gState = ST_MAIN;
   gStateStart = now;
+  tft.setRotation(settings::cfg.rotation);            // apply any settings change
+  analogWrite(TFT_LITE_PIN, settings::cfg.brightness); // auto-brightness re-takes over if on
   mainScreenEnter();
   if (gCo2 != 0)
     renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm, calState(gTimeValid, gNowEpoch));
