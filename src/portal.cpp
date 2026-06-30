@@ -505,8 +505,8 @@ void handleDiag() {
       ROW("Network", "mode") ROW("IP", "ip") ROW("Signal", "sig")
       ROW("Host", "host") ROWD("Auth", "auth") "</div>"
     "<div class=card><div class=cardh>System</div>"
-      ROW("Firmware", "fw") ROW("Uptime", "up")
-      ROW("Free heap", "heap") ROW("Last reset", "reset") "</div>"
+      ROW("Firmware", "fw") ROW("Uptime", "up") ROW("Free heap", "heap")
+      ROW("Last reset", "reset") ROW("Battery", "batt") "</div>"
     "</div>"
     "<div class=card><div class=cardh>Logging</div>"
       ROW("Records", "recs") ROW("Span", "span")
@@ -528,7 +528,7 @@ void handleDiag() {
     "+'CO2: '+d.co2+'\\nTemp/RH: '+d.th+'\\nSCD-41: '+d.scd+'\\nClock: '+d.clock+'\\nLight: '+d.light"
     "+'\\nProfile: '+d.profile+'\\nLast recal: '+d.recal+'\\nCorrection: '+d.corr+'\\nConfidence: '+d.conf"
     "+'\\nNetwork: '+d.mode+'\\nIP: '+d.ip+'\\nSignal: '+d.sig+'\\nHost: '+d.host+'\\nAuth: '+d.auth"
-    "+'\\nFirmware: '+d.fw+'\\nUptime: '+d.up+'\\nHeap: '+d.heap+'\\nReset: '+d.reset"
+    "+'\\nFirmware: '+d.fw+'\\nUptime: '+d.up+'\\nHeap: '+d.heap+'\\nReset: '+d.reset+'\\nBattery: '+d.batt"
     "+'\\nRecords: '+d.recs+'\\nSpan: '+d.span+'\\n';"
     "var a=document.getElementById('cp');a.value=t;a.style.display='block';a.select();"
     "try{document.execCommand('copy');document.getElementById('cpb').textContent='Copied to clipboard';}catch(e){}}"
@@ -593,6 +593,8 @@ void handleDiagJson() {
   kv("up", upStr());
   snprintf(b, sizeof(b), "%lu KB", (unsigned long)(ESP.getFreeHeap() / 1024)); kv("heap", b);
   kv("reset", t.resetReason ? t.resetReason : "?");
+  if (t.hasBatt) { snprintf(b, sizeof(b), "%.0f%% / %.2f V", t.battPct, t.battV); kv("batt", b); }
+  else           kv("batt", "no gauge");
 
   snprintf(b, sizeof(b), "%lu / every %us", (unsigned long)datalog::count(), c.logIntervalSec); kv("recs", b);
   uint32_t o, nw;

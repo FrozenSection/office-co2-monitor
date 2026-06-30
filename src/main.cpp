@@ -15,6 +15,7 @@
 #include <Fonts/FreeSans9pt7b.h>
 #include <SensirionI2cScd4x.h>
 #include <Adafruit_VEML7700.h>
+#include <Adafruit_MAX1704X.h>
 #include <RTClib.h>
 #include <time.h>
 #include <esp_system.h>
@@ -29,10 +30,13 @@
 static Adafruit_GC9A01A tft(TFT_CS_PIN, TFT_DC_PIN, TFT_RST_PIN);
 static SensirionI2cScd4x scd4x;
 static Adafruit_VEML7700 veml;
+static Adafruit_MAX17048 maxlipo;
 static RTC_DS3231 rtc;
 
 static bool     hasLux = false;
 static bool     hasRtc = false;
+static bool     hasBatt = false;
+static float    gBattPct = 0, gBattV = 0;
 static float    gLux   = -1;
 static uint16_t gCo2   = 0;
 static float    gTempC = 0, gHum = 0;
@@ -740,7 +744,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 18: web diagnostics page (/diag + live JSON)\n"));
+  Serial.println(F("Phase 19: MAX17048 battery fuel gauge\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -767,6 +771,14 @@ void setup() {
     Serial.println(F("VEML7700: present -> auto-brightness available"));
   } else {
     Serial.println(F("VEML7700: not found -> fixed brightness"));
+  }
+
+  Wire.beginTransmission(I2C_ADDR_MAX17048);
+  if (Wire.endTransmission() == 0 && maxlipo.begin(&Wire)) {
+    hasBatt = true;
+    Serial.printf("MAX17048: present -> %.2fV  %.0f%%\n", maxlipo.cellVoltage(), maxlipo.cellPercent());
+  } else {
+    Serial.println(F("MAX17048: not found -> no battery gauge"));
   }
 
   if (rtc.begin(&Wire)) {
@@ -857,6 +869,8 @@ void loop() {
     // on screen but greyed, so a frozen number can't read as live).
     gStale = (gCo2 != 0) && (now - gLastReadMs > (uint32_t)SENSOR_STALE_SEC * 1000UL);
 
+    if (hasBatt) { gBattV = maxlipo.cellVoltage(); gBattPct = maxlipo.cellPercent(); }
+
     // Push live state to the portal for the /diag page.
     portal::Telemetry tel;
     tel.co2 = gCo2; tel.tempC = gTempC; tel.hum = gHum;
@@ -865,6 +879,7 @@ void loop() {
     tel.timeValid = gTimeValid; tel.nowEpoch = gNowEpoch;
     tel.lux = gLux; tel.brightness = gBrightness;
     tel.frcValid = gFrcOk; tel.frcCorrPpm = gFrcOk ? (int)gFrcCorr - 0x8000 : 0;
+    tel.hasBatt = hasBatt; tel.battPct = gBattPct; tel.battV = gBattV;
     tel.resetReason = resetReasonStr();
     portal::setTelemetry(tel);
 

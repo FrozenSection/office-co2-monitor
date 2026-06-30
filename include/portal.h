@@ -19,6 +19,7 @@ namespace portal {
     bool     timeValid; uint32_t nowEpoch;
     float    lux; int brightness;     // brightness = perceptual level 0..255
     bool     frcValid; int frcCorrPpm;
+    bool     hasBatt; float battPct; float battV;
     const char* resetReason;
   };
   void setTelemetry(const Telemetry& t);
