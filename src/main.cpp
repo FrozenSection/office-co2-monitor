@@ -203,6 +203,7 @@ static int         mLastTrend;
 static char        mLastTime[8];
 static char        mLastBot[24];
 static bool        mLastStale;
+static int         mLastBatt;
 
 // Cool-family calibration colors (distinct from the AQ tier ramp).
 static uint16_t calColor(CalState c) {
@@ -279,16 +280,33 @@ static void drawStatusTrend(int cy, uint16_t color, const char* word, int dir) {
   drawTrend(x0 + (int)w + gap + tri / 2, cy, dir, cSec());
 }
 
+static uint16_t battColor(int pct) {
+  if (pct <= 15) return GC9A01A_RED;
+  if (pct <= 35) return cOrange();
+  return cSec();                       // healthy: subtle grey, not attention-grabbing
+}
+
+// Small horizontal battery glyph: outline + terminal nub + proportional fill.
+static void drawBattery(int cx, int cy, int pct, uint16_t color) {
+  const int w = 24, h = 12, nub = 2;
+  int x = cx - (w + nub) / 2, y = cy - h / 2;
+  tft.drawRect(x, y, w, h, color);
+  tft.fillRect(x + w, y + h / 2 - 3, nub, 6, color);
+  int fw = (w - 4) * pct / 100;
+  if (fw < 0) fw = 0; else if (fw > w - 4) fw = w - 4;
+  if (fw > 0) tft.fillRect(x + 2, y + 2, fw, h - 4, color);
+}
+
 // Design 1 "Aperture": tier ring, white number, faint label, colored status +
 // trend, secondary temp/RH, cool calibration dot (shown only when aging+).
 static void mainScreenEnter() {
   mLastCo2 = 0xFFFF; mLastRing = 0; mLastLabel = nullptr;
-  mLastCal = (CalState)255; mLastTrend = 99; mLastStale = false;
+  mLastCal = (CalState)255; mLastTrend = 99; mLastStale = false; mLastBatt = -999;
   mLastTime[0] = '\0'; mLastBot[0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
   drawCO2(&FreeSans9pt7b, &FreeSans9pt7b, 120, 136, cFaint(), " ppm");
   zoneC(&FreeSans12pt7b, 120, 102, 200, 26, GC9A01A_WHITE,  "warming up");
-  zoneC(&FreeSans12pt7b, 120,  48,  90, 24, cFaint(),       "--:--");
+  zoneC(&FreeSans12pt7b, 120,  56,  90, 24, cFaint(),       "--:--");
 }
 
 static void renderMain(uint16_t co2, float tempC, float hum,
@@ -323,7 +341,7 @@ static void renderMain(uint16_t co2, float tempC, float hum,
   if (timeValid) snprintf(ts, sizeof(ts), "%02d:%02d", hh, mm);
   else           strcpy(ts, "--:--");
   if (strcmp(ts, mLastTime) != 0) {
-    zoneC(&FreeSans12pt7b, 120, 48, 90, 24, timeValid ? cSec() : cFaint(), ts);
+    zoneC(&FreeSans12pt7b, 120, 56, 90, 24, timeValid ? cSec() : cFaint(), ts);
     strcpy(mLastTime, ts);
   }
 
@@ -344,6 +362,17 @@ static void renderMain(uint16_t co2, float tempC, float hum,
     if (cal == CAL_AGING || cal == CAL_STALE || cal == CAL_OVERDUE)
       tft.fillCircle(120, 216, 5, calColor(cal));
     mLastCal = cal;
+  }
+
+  // battery glyph — top center, mirrors the cal dot; only when a gauge is present
+  if (hasBatt) {
+    int p = (int)(gBattPct + 0.5f);
+    if (p < 0) p = 0; else if (p > 100) p = 100;
+    if (p != mLastBatt) {
+      tft.fillRect(102, 16, 36, 16, GC9A01A_BLACK);
+      drawBattery(120, 24, p, battColor(p));
+      mLastBatt = p;
+    }
   }
 }
 
@@ -434,9 +463,15 @@ static void renderDiagView() {
     diagRow(1, 82, cFaint(), line);
   }
 
-  // sensors detected
-  snprintf(line, sizeof(line), "scd41%s%s", hasRtc ? " rtc" : "", hasLux ? " lux" : "");
-  diagRow(2, 104, cSec(), line);
+  // battery (or sensor-presence fallback when no fuel gauge is fitted)
+  if (hasBatt) {
+    int p = (int)(gBattPct + 0.5f);
+    snprintf(line, sizeof(line), "batt %d%%  %.2fV", p, gBattV);
+    diagRow(2, 104, battColor(p), line);
+  } else {
+    snprintf(line, sizeof(line), "scd41%s%s", hasRtc ? " rtc" : "", hasLux ? " lux" : "");
+    diagRow(2, 104, cSec(), line);
+  }
 
   // identity (middle)
   if (up < 86400) snprintf(line, sizeof(line), "v%s  up %lu:%02lu", FIRMWARE_VERSION,
