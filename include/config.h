@@ -83,6 +83,7 @@
 #define FRC_PLAUSIBLE_LO_PPM     250   // outdoor reading must be within this range
 #define FRC_PLAUSIBLE_HI_PPM     600
 #define SENSOR_STALE_SEC         30    // no good read for this long -> mark stale
+#define SENSOR_FAULT_BOOT_SEC    30    // no first reading by this uptime -> show fault
 
 // Auto-brightness (active only when a VEML7700 is detected). Lux maps to a
 // 0..1 position LOGARITHMICALLY (lux spans decades), then to a perceptual

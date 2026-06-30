@@ -161,6 +161,33 @@ String opt(const char* val, const char* cur, const char* label) {
   return s;
 }
 
+// Escape a value for a single-quoted HTML attribute (hostname/SSID can be anything).
+String htmlAttrEsc(const String& v) {
+  String o; o.reserve(v.length() + 8);
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if      (c == '&')  o += "&amp;";
+    else if (c == '<')  o += "&lt;";
+    else if (c == '>')  o += "&gt;";
+    else if (c == '\'') o += "&#39;";
+    else if (c == '"')  o += "&quot;";
+    else                o += c;
+  }
+  return o;
+}
+
+// Escape a value for a JSON string (SSID/hostname could contain " or \).
+String jsonEsc(const String& v) {
+  String o; o.reserve(v.length() + 8);
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if      (c == '"' || c == '\\')   { o += '\\'; o += c; }
+    else if ((unsigned char)c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); o += b; }
+    else                                o += c;
+  }
+  return o;
+}
+
 String pageHtml() {
   Settings& c = settings::cfg;
   String unitCur = String(c.tempUnitF ? 1 : 0);
@@ -229,7 +256,7 @@ String pageHtml() {
   String net;
   net += fieldH("Device name",
                 "<input name=host autocapitalize=none autocorrect=off spellcheck=false value='"
-                + String(c.hostname) + "'>", "Used for &lt;name&gt;.local and the setup AP");
+                + htmlAttrEsc(c.hostname) + "'>", "Lowercase letters, digits, hyphens (used for &lt;name&gt;.local)");
   net += check("sta", c.staEnabled, "Stay on home WiFi (serve on the LAN)");
   net += fieldH("Web / OTA password",
                 "<input name=webpw type=password autocapitalize=none autocorrect=off "
@@ -239,7 +266,7 @@ String pageHtml() {
                 "spellcheck=false placeholder='(repeat to confirm)'>");
   net += fieldH("WiFi network",
                 "<input name=ssid autocapitalize=none autocorrect=off autocomplete=off "
-                "spellcheck=false value='" + String(c.wifiSsid) + "'>");
+                "spellcheck=false value='" + htmlAttrEsc(c.wifiSsid) + "'>");
   net += fieldH("WiFi password",
                 "<input name=pass type=password autocapitalize=none autocorrect=off "
                 "spellcheck=false placeholder='(leave blank to keep)'>");
@@ -295,8 +322,16 @@ void applyFormToSettings() {
   String pass = server.arg("pass");
   if (pass.length()) strlcpy(c.wifiPass, pass.c_str(), sizeof(c.wifiPass));
   strlcpy(c.timezone, server.arg("tz").c_str(), sizeof(c.timezone));
-  if (server.arg("host").length())
-    strlcpy(c.hostname, server.arg("host").c_str(), sizeof(c.hostname));
+  String hn = server.arg("host");           // sanitize to mDNS-legal [a-z0-9-]
+  if (hn.length()) {
+    String clean;
+    for (size_t i = 0; i < hn.length(); i++) {
+      char ch = hn[i];
+      if (ch >= 'A' && ch <= 'Z') ch += 32;
+      if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') clean += ch;
+    }
+    if (clean.length()) strlcpy(c.hostname, clean.c_str(), sizeof(c.hostname));
+  }
   c.staEnabled = server.hasArg("sta");
   c.logIntervalSec = constrain(server.arg("logiv").toInt(), 5, 86400);
   String wpw = server.arg("webpw");
@@ -332,6 +367,8 @@ void applyFormToSettings() {
   if (c.luxHigh <= c.luxLow)              c.luxHigh = c.luxLow + 1;
 
   settings::save();
+  // keep OTA auth in step with a password set after boot (routes register once)
+  if (c.webPassword[0]) ElegantOTA.setAuth("admin", c.webPassword);
 }
 
 // HTTP Basic auth gate. Open when no web password is set.
@@ -550,7 +587,7 @@ void handleDiagJson() {
   portal::Telemetry& t = gTelem;
   char b[64];
   String j = "{";
-  auto kv = [&](const char* k, const String& v) { j += '"'; j += k; j += "\":\""; j += v; j += "\","; };
+  auto kv = [&](const char* k, const String& v) { j += '"'; j += k; j += "\":\""; j += jsonEsc(v); j += "\","; };
 
   if (t.co2) { snprintf(b, sizeof(b), "%u ppm", t.co2); kv("co2", b); } else kv("co2", "warming up");
   { float ts = c.tempUnitF ? t.tempC * 9.0f / 5 + 32 : t.tempC;
@@ -674,12 +711,16 @@ void portal::handle() {
 
 void portal::stopAP() {
   if (!gApActive) return;
-  server.stop();
-  dns.stop();
-  WiFi.softAPdisconnect(true);
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
   gApActive = false;
+  dns.stop();
+  WiFi.softAPdisconnect(true);             // drop the AP
+  if (gStaActive) {
+    WiFi.mode(WIFI_STA);                    // keep the home-WiFi link + LAN server up
+  } else {
+    server.stop();
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
 }
 
 bool          portal::apActive()  { return gApActive; }

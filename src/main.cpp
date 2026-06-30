@@ -52,6 +52,7 @@ static bool     gFrcOk   = false;
 
 static uint32_t gLastReadMs = 0;        // millis() of last good SCD-41 read
 static bool     gStale      = false;    // no fresh reading for SENSOR_STALE_SEC
+static bool     gSensorFault = false;   // no first reading by SENSOR_FAULT_BOOT_SEC
 
 // Why an FRC was refused (so the result screen can explain).
 enum FrcFail { FRCF_NONE, FRCF_UNSTABLE, FRCF_IMPLAUSIBLE, FRCF_SENSOR };
@@ -204,6 +205,7 @@ static char        mLastTime[8];
 static char        mLastBot[24];
 static bool        mLastStale;
 static int         mLastBatt;
+static bool        mFaultDrawn;
 
 // Cool-family calibration colors (distinct from the AQ tier ramp).
 static uint16_t calColor(CalState c) {
@@ -302,6 +304,7 @@ static void drawBattery(int cx, int cy, int pct, uint16_t color) {
 static void mainScreenEnter() {
   mLastCo2 = 0xFFFF; mLastRing = 0; mLastLabel = nullptr;
   mLastCal = (CalState)255; mLastTrend = 99; mLastStale = false; mLastBatt = -999;
+  mFaultDrawn = false;
   mLastTime[0] = '\0'; mLastBot[0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
   drawCO2(&FreeSans9pt7b, &FreeSans9pt7b, 120, 136, cFaint(), " ppm");
@@ -428,7 +431,7 @@ static void renderTimeView() {
 }
 
 // ---- diagnostics view ------------------------------------------------------
-static char dLastRow[7][24];
+static char dLastRow[7][40];
 
 static void diagViewEnter() {
   for (int i = 0; i < 7; i++) dLastRow[i][0] = '\0';
@@ -517,6 +520,10 @@ static void renderView() {
       if (gCo2 != 0)
         renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm,
                    calState(gTimeValid, gNowEpoch));
+      else if (gSensorFault && !mFaultDrawn) {   // never produced a reading -> fault
+        zoneC(&FreeSans12pt7b, 120, 102, 200, 26, GC9A01A_RED, "no sensor");
+        mFaultDrawn = true;
+      }
       break;
   }
 }
@@ -629,6 +636,13 @@ static void commitFRC() {
   gFrcFail = FRCF_NONE;
   gFrcOk   = false;
   gFrcLast = gCo2;
+
+  if (gStale) {                          // sensor went quiet during equilibration
+    gFrcFail = FRCF_SENSOR;
+    Serial.println(F("FRC refused: reading is stale"));
+    datalog::event(gTimeValid ? gNowEpoch : 0, "frc refused: stale sensor");
+    return;
+  }
 
   uint16_t mn = 0xFFFF, mx = 0;
   for (uint8_t i = 0; i < gEqN; i++) {
@@ -779,7 +793,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 19: MAX17048 battery fuel gauge\n"));
+  Serial.println(F("Phase 20: audit fixes (FRC stale gate, escaping, fault, log realign)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -903,6 +917,7 @@ void loop() {
     // Mark the reading stale if the SCD-41 has gone quiet (keep the last value
     // on screen but greyed, so a frozen number can't read as live).
     gStale = (gCo2 != 0) && (now - gLastReadMs > (uint32_t)SENSOR_STALE_SEC * 1000UL);
+    gSensorFault = (gCo2 == 0) && (now > (uint32_t)SENSOR_FAULT_BOOT_SEC * 1000UL);
 
     if (hasBatt) { gBattV = maxlipo.cellVoltage(); gBattPct = maxlipo.cellPercent(); }
 

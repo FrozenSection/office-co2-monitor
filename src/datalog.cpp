@@ -26,6 +26,37 @@ bool datalog::begin() {
     return false;
   }
   gReady = true;
+
+  // Heal a torn trailing record (power loss mid-write) so later appends stay
+  // record-aligned; otherwise everything after the partial record reads as garbage.
+  {
+    File f = LittleFS.open(CUR, "r");
+    if (f) {
+      size_t sz = f.size();
+      if (sz % REC != 0) {
+        size_t good = (sz / REC) * REC;
+        File t = LittleFS.open("/log.tmp", "w");
+        bool ok = false;
+        if (t) {
+          uint8_t buf[REC]; size_t c = 0;
+          while (c < good && f.read(buf, REC) == (int)REC) { t.write(buf, REC); c += REC; }
+          t.close();
+          ok = (c == good);
+        }
+        f.close();
+        if (ok) {
+          LittleFS.remove(CUR);
+          LittleFS.rename("/log.tmp", CUR);
+          Serial.printf("datalog: realigned torn record (%u -> %u bytes)\n", (unsigned)sz, (unsigned)good);
+        } else {
+          LittleFS.remove("/log.tmp");
+        }
+      } else {
+        f.close();
+      }
+    }
+  }
+
   Serial.printf("datalog: ready, %u records\n", (unsigned)count());
   return true;
 }
