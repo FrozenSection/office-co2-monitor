@@ -81,6 +81,9 @@ const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\
   ".cardh{font-size:12px;color:#159b90;font-weight:500;margin:0 0 8px}" \
   ".copy{background:#fff;border:1px solid #d6d6d2;color:#444;width:100%}" \
   ".danger{background:#fff;border:1px solid #d98a8a;color:#b03030;width:100%}" \
+  ".range{display:flex;gap:8px;align-items:center;margin-bottom:12px}" \
+  ".range button{padding:6px 12px;font-size:13px;background:#fff;border:1px solid #d6d6d2;color:#555}" \
+  ".range button.on{background:#159b90;color:#fff;border-color:#159b90}" \
   "textarea{width:100%;box-sizing:border-box;border:1px solid #d6d6d2;border-radius:8px}" \
   "</style>"
 
@@ -91,22 +94,31 @@ const char* HISTORY_PAGE =
   UI_CSS
   "<div class=wrap><h1>History</h1>"
   "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
-  "<a href='/events'>Event log</a><a href='/data.csv'>Download CSV</a>"
-  "<span id=n style='color:#999'></span></div>"
+  "<a href='/events'>Event log</a><a href='/data.csv'>Download CSV</a></div>"
+  "<div class=range><button onclick='load(24,this)'>24 h</button>"
+  "<button onclick='load(168,this)'>7 d</button>"
+  "<button onclick='load(0,this)'>All</button>"
+  "<span id=n class=s></span></div>"
   "<div class=card><canvas id=c height=240></canvas></div></div>"
   "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>"
-  "<script>fetch('/data.json').then(r=>r.json()).then(d=>{"
+  "<script>let ch;"
+  "function load(h,btn){"
+  "document.querySelectorAll('.range button').forEach(b=>b.className='');"
+  "if(btn)btn.className='on';"
+  "fetch('/data.json?h='+h).then(r=>r.json()).then(d=>{"
   "document.getElementById('n').textContent=d.length+' points';"
   "const lab=d.map(x=>new Date(x[0]*1000).toLocaleString([],"
   "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));"
-  "new Chart(document.getElementById('c'),{type:'line',data:{labels:lab,datasets:["
+  "if(ch)ch.destroy();"
+  "ch=new Chart(document.getElementById('c'),{type:'line',data:{labels:lab,datasets:["
   "{label:'CO2 ppm',data:d.map(x=>x[1]),borderColor:'#e2554b',pointRadius:0,borderWidth:2,yAxisID:'y'},"
   "{label:'temp',data:d.map(x=>x[2]),borderColor:'#3E8BF0',pointRadius:0,borderWidth:1,yAxisID:'y2'}]},"
   "options:{animation:false,interaction:{mode:'index',intersect:false},"
   "plugins:{legend:{labels:{boxWidth:12,font:{size:11}}}},"
   "scales:{x:{ticks:{maxTicksLimit:8,font:{size:10}}},"
   "y:{position:'left',grace:'8%',title:{display:true,text:'ppm'}},"
-  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});});</script>";
+  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});});}"
+  "load(24,document.querySelectorAll('.range button')[0]);</script>";
 
 // --- html builders ---
 String card(const char* sec, const String& body) {
@@ -119,10 +131,11 @@ String fieldH(const char* label, const String& input, const char* hint = "") {
   return s + "</div>";
 }
 
-String check(const char* name, bool on, const char* text) {
+String check(const char* name, bool on, const char* text, const char* hint = "") {
   String s = "<div class=f><label class=chk><input type=checkbox name=";
-  s += name; s += on ? " checked> " : "> "; s += text;
-  return s + "</label></div>";
+  s += name; s += on ? " checked> " : "> "; s += text; s += "</label>";
+  if (hint && *hint) { s += "<div class=hint>"; s += hint; s += "</div>"; }
+  return s + "</div>";
 }
 
 // Paired/triple inputs each get their own caption, so they can't be confused.
@@ -257,7 +270,8 @@ String pageHtml() {
   net += fieldH("Device name",
                 "<input name=host autocapitalize=none autocorrect=off spellcheck=false value='"
                 + htmlAttrEsc(c.hostname) + "'>", "Lowercase letters, digits, hyphens (used for &lt;name&gt;.local)");
-  net += check("sta", c.staEnabled, "Stay on home WiFi (serve on the LAN)");
+  net += check("sta", c.staEnabled, "WiFi \xE2\x80\x94 connect to home network",
+               "Off = radio disabled; reconfigure via the setup AP (hold the button). Saving restarts to apply.");
   net += fieldH("Web / OTA password",
                 "<input name=webpw type=password autocapitalize=none autocorrect=off "
                 "spellcheck=false placeholder='(blank keeps current)'>");
@@ -369,6 +383,10 @@ void applyFormToSettings() {
   settings::save();
   // keep OTA auth in step with a password set after boot (routes register once)
   if (c.webPassword[0]) ElegantOTA.setAuth("admin", c.webPassword);
+  // apply a timezone change immediately (clock display, event log, /diag) —
+  // previously only setup()/NTP paths called tzset, so plain Save left the old zone
+  setenv("TZ", c.timezone, 1);
+  tzset();
 }
 
 // HTTP Basic auth gate. Open when no web password is set.
@@ -397,23 +415,55 @@ void handleRoot() {
   server.send(200, "text/html", pageHtml());
 }
 
+// Send a brief page, then restart so a WiFi change takes effect cleanly.
+void restartWith(const char* title, const char* note) {
+  String h = "<!doctype html><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<meta http-equiv=refresh content='9;url=/'>" UI_CSS
+    "<div class=wrap><div class=card><h1 style='margin-top:0'>";
+  h += title;
+  h += "</h1><div class=s>";
+  h += note;
+  h += "</div></div></div>";
+  server.send(200, "text/html", h);
+  delay(500);
+  ESP.restart();
+}
+
 void handleSaveSettings() {
   if (!authed()) return;
   if (passwordMismatch()) return;
+  bool wasSta = settings::cfg.staEnabled;
   applyFormToSettings();
+  if (settings::cfg.staEnabled != wasSta) {       // WiFi toggled -> restart to (dis)connect
+    restartWith("Applying WiFi change\xE2\x80\xA6",
+                "Restarting. If you turned WiFi off, reconnect via the device's setup AP "
+                "(hold the button).");
+    return;
+  }
   sendResult("Saved", "Settings stored. Display and air-quality changes are live; "
-                      "profile, home-WiFi, altitude, and temp offset apply after a restart.");
+                      "profile, altitude, and temp offset apply after a restart.");
 }
 
 void handleSync() {
   if (!authed()) return;
   if (passwordMismatch()) return;
+  bool wasSta = settings::cfg.staEnabled;
   applyFormToSettings();
+  bool toggled = settings::cfg.staEnabled != wasSta;
 
-  // Already on home WiFi -> just NTP.
+  // Already on home WiFi -> NTP, then honor a WiFi-toggle change like Save does.
   if (gStaActive && WiFi.status() == WL_CONNECTED) {
-    if (doNtp()) sendResult("Time synced", "Clock set from NTP.");
-    else         sendResult("No time", "NTP didn't answer. Try again shortly.");
+    bool ok = doNtp();
+    if (toggled) {
+      restartWith(ok ? "Time synced \xE2\x80\x94 applying WiFi change\xE2\x80\xA6"
+                     : "Applying WiFi change\xE2\x80\xA6",
+                  "Restarting. If you turned WiFi off, reconnect via the device's setup AP "
+                  "(hold the button).");
+      return;
+    }
+    if (ok) sendResult("Time synced", "Clock set from NTP.");
+    else    sendResult("No time", "NTP didn't answer. Try again shortly.");
     return;
   }
 
@@ -425,19 +475,30 @@ void handleSync() {
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(200);
   if (WiFi.status() != WL_CONNECTED) {
+    // stay in the AP so the user can fix credentials and retry (no restart even
+    // if the toggle changed — a reboot here would strand the device offline)
     gPhase = portal::P_FAILED;
     strlcpy(gStatus, "wifi failed", sizeof(gStatus));
     sendResult("Couldn't connect", "Check the network name and password, then try again.");
     return;
   }
-  if (doNtp()) {
-    gPhase = portal::P_SYNCED;
-    sendResult("Time synced", "Settings saved and the clock is set from NTP.");
-  } else {
-    gPhase = portal::P_FAILED;
-    strlcpy(gStatus, "ntp failed", sizeof(gStatus));
-    sendResult("Connected, but no time", "NTP didn't answer. Try again in a moment.");
+  bool ntpOk = doNtp();
+  gPhase = ntpOk ? portal::P_SYNCED : portal::P_FAILED;
+  if (!ntpOk) strlcpy(gStatus, "ntp failed", sizeof(gStatus));
+
+  if (settings::cfg.staEnabled) {
+    // This ad-hoc STA link never set gStaActive, so exiting the AP would tear it
+    // down (the "verified WiFi, then went dark" trap). Restart: the device boots
+    // straight onto home WiFi properly (mDNS, LAN page, NTP retry if needed).
+    restartWith(ntpOk ? "Time synced \xE2\x80\x94 joining home WiFi\xE2\x80\xA6"
+                      : "Joining home WiFi\xE2\x80\xA6",
+                "WiFi verified. Restarting to connect properly \xE2\x80\x94 find the device "
+                "at its usual address in a few seconds.");
+    return;
   }
+  // One-shot sync (WiFi stays off): the link is dropped when the AP closes.
+  if (ntpOk) sendResult("Time synced", "Settings saved and the clock is set from NTP.");
+  else       sendResult("Connected, but no time", "NTP didn't answer. Try again in a moment.");
 }
 
 void handleRestart() {
@@ -455,8 +516,9 @@ void handleNotFound() {
   if (gApActive) {   // captive redirect to the portal page
     server.sendHeader("Location", String("http://") + gApIp + "/", true);
     server.send(302, "text/plain", "");
-  } else {
-    server.send(200, "text/html", pageHtml());
+  } else {           // STA: bounce to "/" so auth is enforced there (never serve
+    server.sendHeader("Location", "/", true);   // the settings page ungated)
+    server.send(302, "text/plain", "");
   }
 }
 
@@ -467,7 +529,16 @@ void handleHistory() {
 
 void handleDataJson() {
   if (!authed()) return;
-  uint32_t total  = datalog::count();
+  long hours = server.arg("h").toInt();        // 0 / absent = all history
+  if (hours < 0) hours = 0;
+  if (hours > 24L * 3650) hours = 24L * 3650;  // clamp: h*3600 must not wrap uint32
+  uint32_t cutoff = 0;
+  if (hours > 0 && gTelem.nowEpoch > 0) {
+    uint32_t span = (uint32_t)hours * 3600;
+    cutoff = (gTelem.nowEpoch > span) ? gTelem.nowEpoch - span : 0;
+  }
+  uint32_t total = 0;
+  datalog::readAll([&](const datalog::Rec& r) { if (r.t >= cutoff) total++; });
   uint32_t stride = (total > LOG_GRAPH_MAX_POINTS) ? (total / LOG_GRAPH_MAX_POINTS) : 1;
   if (stride == 0) stride = 1;
   bool unitF = settings::cfg.tempUnitF;
@@ -478,6 +549,7 @@ void handleDataJson() {
   String buf; buf.reserve(2048);
   uint32_t i = 0; bool first = true;
   datalog::readAll([&](const datalog::Rec& r) {
+    if (r.t < cutoff) return;
     if ((i++ % stride) != 0) return;
     float temp = unitF ? (r.tempC10 / 10.0f * 9.0f / 5.0f + 32.0f) : r.tempC10 / 10.0f;
     if (!first) buf += ',';
@@ -511,10 +583,52 @@ void handleDataCsv() {
 
 void handleEvents() {
   if (!authed()) return;
-  String log = datalog::events();
-  String out = "epoch,event\n";
-  out += log.length() ? log : "(no events logged yet)\n";
-  server.send(200, "text/plain", out);
+  String raw = datalog::events();
+
+  // Stream in chunks (like /data.csv) — the full log rendered as HTML rows is
+  // far bigger than the raw text, and one giant String risks failing on a
+  // fragmented heap with WiFi active.
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", "");
+  server.sendContent(
+    "<!doctype html><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>stuffy events</title>" UI_CSS
+    "<div class=wrap><h1>Event log</h1>"
+    "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
+    "<a href='/history'>History</a></div><div class=card>");
+
+  // Newest-first with local timestamps; tint failures/refusals.
+  String buf; buf.reserve(2048);
+  bool any = false;
+  int end = raw.length();
+  while (end > 0) {
+    int nl = raw.lastIndexOf('\n', end - 1);
+    String line = raw.substring(nl + 1, end);
+    end = nl;
+    line.trim();
+    if (line.length()) {
+      int comma = line.indexOf(',');
+      if (comma > 0) {
+        any = true;
+        uint32_t ep = (uint32_t)line.substring(0, comma).toInt();
+        String msg = line.substring(comma + 1);
+        char ts[24];
+        if (ep > 0) { time_t tt = ep; struct tm lt; localtime_r(&tt, &lt); strftime(ts, sizeof(ts), "%b %d  %H:%M", &lt); }
+        else strcpy(ts, "(no clock)");
+        const char* col = (msg.indexOf("fail") >= 0 || msg.indexOf("refused") >= 0) ? "#b06a1a" : "#333";
+        buf += "<div class=stat><span class=k style='flex:none;min-width:100px'>";
+        buf += ts;
+        buf += "</span><span class=v style='flex:1;text-align:left;color:";
+        buf += col; buf += "'>"; buf += htmlAttrEsc(msg); buf += "</span></div>";
+        if (buf.length() > 1800) { server.sendContent(buf); buf = ""; }
+      }
+    }
+  }
+  if (!any) buf += "<div class=s>No events logged yet.</div>";
+  buf += "</div></div>";
+  server.sendContent(buf);
+  server.sendContent("");
 }
 
 #define ROW(label,id)  "<div class=stat><span class=k>" label "</span><span class=v id=" id "></span></div>"
@@ -543,7 +657,7 @@ void handleDiag() {
       ROW("Host", "host") ROWD("Auth", "auth") "</div>"
     "<div class=card><div class=cardh>System</div>"
       ROW("Firmware", "fw") ROW("Uptime", "up") ROW("Free heap", "heap")
-      ROW("Last reset", "reset") ROW("Battery", "batt") "</div>"
+      ROW("Last reset", "reset") ROW("Battery", "batt") ROW("Est. runtime", "runtime") "</div>"
     "</div>"
     "<div class=card><div class=cardh>Logging</div>"
       ROW("Records", "recs") ROW("Span", "span")
@@ -565,7 +679,7 @@ void handleDiag() {
     "+'CO2: '+d.co2+'\\nTemp/RH: '+d.th+'\\nSCD-41: '+d.scd+'\\nClock: '+d.clock+'\\nLight: '+d.light"
     "+'\\nProfile: '+d.profile+'\\nLast recal: '+d.recal+'\\nCorrection: '+d.corr+'\\nConfidence: '+d.conf"
     "+'\\nNetwork: '+d.mode+'\\nIP: '+d.ip+'\\nSignal: '+d.sig+'\\nHost: '+d.host+'\\nAuth: '+d.auth"
-    "+'\\nFirmware: '+d.fw+'\\nUptime: '+d.up+'\\nHeap: '+d.heap+'\\nReset: '+d.reset+'\\nBattery: '+d.batt"
+    "+'\\nFirmware: '+d.fw+'\\nUptime: '+d.up+'\\nHeap: '+d.heap+'\\nReset: '+d.reset+'\\nBattery: '+d.batt+'\\nRuntime: '+d.runtime"
     "+'\\nRecords: '+d.recs+'\\nSpan: '+d.span+'\\n';"
     "var a=document.getElementById('cp');a.value=t;a.style.display='block';a.select();"
     "try{document.execCommand('copy');document.getElementById('cpb').textContent='Copied to clipboard';}catch(e){}}"
@@ -608,7 +722,8 @@ void handleDiagJson() {
   if (t.frcValid) { snprintf(b, sizeof(b), "%+d ppm", t.frcCorrPpm); kv("corr", b); } else kv("corr", "-");
   if (!t.timeValid || c.lastFrcEpoch == 0) { kv("recal", "never"); kv("conf", "not set"); kv("confS", "warn"); }
   else {
-    uint32_t days = (t.nowEpoch - c.lastFrcEpoch) / 86400UL;
+    uint32_t days = (t.nowEpoch > c.lastFrcEpoch)          // clock corrected backwards
+                      ? (t.nowEpoch - c.lastFrcEpoch) / 86400UL : 0;
     snprintf(b, sizeof(b), "%lu days ago", (unsigned long)days); kv("recal", b);
     const char *cf, *cs;
     if (days >= c.calOverdueDays)    { cf = "overdue"; cs = "bad"; }
@@ -632,6 +747,10 @@ void handleDiagJson() {
   kv("reset", t.resetReason ? t.resetReason : "?");
   if (t.hasBatt) { snprintf(b, sizeof(b), "%.0f%% / %.2f V", t.battPct, t.battV); kv("batt", b); }
   else           kv("batt", "no gauge");
+  if (!t.hasBatt)               kv("runtime", "-");
+  else if (t.battRate > 1.0f)   kv("runtime", "charging");
+  else if (t.battRate < -1.0f)  { snprintf(b, sizeof(b), "~%.1f h left", t.battPct / -t.battRate); kv("runtime", b); }
+  else                          kv("runtime", "steady");
 
   snprintf(b, sizeof(b), "%lu / every %us", (unsigned long)datalog::count(), c.logIntervalSec); kv("recs", b);
   uint32_t o, nw;
@@ -648,19 +767,25 @@ void handleDiagJson() {
 }
 
 void setupRoutes() {
-  server.on("/", handleRoot);
-  server.on("/save", HTTP_POST, handleSaveSettings);
-  server.on("/sync", HTTP_POST, handleSync);
-  server.on("/restart", HTTP_POST, handleRestart);
-  server.on("/history", handleHistory);
-  server.on("/data.json", handleDataJson);
-  server.on("/data.csv", handleDataCsv);
-  server.on("/events", handleEvents);
-  server.on("/diag", handleDiag);
-  server.on("/diag.json", handleDiagJson);
-  server.on("/wipe", HTTP_POST, handleWipe);
-  server.onNotFound(handleNotFound);
-  ElegantOTA.begin(&server);                 // serves /update with a progress UI
+  // Register handlers exactly once: server.stop() doesn't free the handler
+  // chain, so re-registering on every AP open/close cycle leaks heap.
+  static bool routed = false;
+  if (!routed) {
+    routed = true;
+    server.on("/", handleRoot);
+    server.on("/save", HTTP_POST, handleSaveSettings);
+    server.on("/sync", HTTP_POST, handleSync);
+    server.on("/restart", HTTP_POST, handleRestart);
+    server.on("/history", handleHistory);
+    server.on("/data.json", handleDataJson);
+    server.on("/data.csv", handleDataCsv);
+    server.on("/events", handleEvents);
+    server.on("/diag", handleDiag);
+    server.on("/diag.json", handleDiagJson);
+    server.on("/wipe", HTTP_POST, handleWipe);
+    server.onNotFound(handleNotFound);
+    ElegantOTA.begin(&server);               // serves /update with a progress UI
+  }
   if (settings::cfg.webPassword[0])
     ElegantOTA.setAuth("admin", settings::cfg.webPassword);
   server.begin();

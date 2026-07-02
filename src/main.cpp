@@ -36,7 +36,7 @@ static RTC_DS3231 rtc;
 static bool     hasLux = false;
 static bool     hasRtc = false;
 static bool     hasBatt = false;
-static float    gBattPct = 0, gBattV = 0;
+static float    gBattPct = 0, gBattV = 0, gBattRate = 0;   // rate: %/hr, +charging
 static float    gLux   = -1;
 static uint16_t gCo2   = 0;
 static float    gTempC = 0, gHum = 0;
@@ -150,7 +150,9 @@ static uint16_t co2Color(uint16_t co2, const char** label) {
 
 static CalState calState(bool timeValid, uint32_t nowEpoch) {
   if (!timeValid || settings::cfg.lastFrcEpoch == 0) return CAL_UNKNOWN;
-  uint32_t days = (nowEpoch - settings::cfg.lastFrcEpoch) / 86400UL;
+  // guard: FRC done on a fast clock, then NTP corrects backwards -> would underflow
+  uint32_t days = (nowEpoch > settings::cfg.lastFrcEpoch)
+                    ? (nowEpoch - settings::cfg.lastFrcEpoch) / 86400UL : 0;
   if (days >= settings::cfg.calOverdueDays) return CAL_OVERDUE;
   if (days >= settings::cfg.calStaleDays)   return CAL_STALE;
   if (days >= settings::cfg.calAgingDays)   return CAL_AGING;
@@ -299,6 +301,19 @@ static void drawBattery(int cx, int cy, int pct, uint16_t color) {
   if (fw > 0) tft.fillRect(x + 2, y + 2, fw, h - 4, color);
 }
 
+// Battery glyph — top center, mirrors the cal dot; only when a gauge is present.
+// Shared by the normal main view and the sensor-fault screen.
+static void updateBattGlyph() {
+  if (!hasBatt) return;
+  int p = (int)(gBattPct + 0.5f);
+  if (p < 0) p = 0; else if (p > 100) p = 100;
+  if (p != mLastBatt) {
+    tft.fillRect(102, 16, 36, 16, GC9A01A_BLACK);
+    drawBattery(120, 24, p, battColor(p));
+    mLastBatt = p;
+  }
+}
+
 // Design 1 "Aperture": tier ring, white number, faint label, colored status +
 // trend, secondary temp/RH, cool calibration dot (shown only when aging+).
 static void mainScreenEnter() {
@@ -367,25 +382,17 @@ static void renderMain(uint16_t co2, float tempC, float hum,
     mLastCal = cal;
   }
 
-  // battery glyph — top center, mirrors the cal dot; only when a gauge is present
-  if (hasBatt) {
-    int p = (int)(gBattPct + 0.5f);
-    if (p < 0) p = 0; else if (p > 100) p = 100;
-    if (p != mLastBatt) {
-      tft.fillRect(102, 16, 36, 16, GC9A01A_BLACK);
-      drawBattery(120, 24, p, battColor(p));
-      mLastBatt = p;
-    }
-  }
+  updateBattGlyph();
 }
 
 // ---- time view (clock-prominent) -------------------------------------------
 static uint16_t tLastCo2;
+static bool     tLastStale;
 static char     tLastClock[8];
 static char     tLastBot[24];
 
 static void timeViewEnter() {
-  tLastCo2 = 0xFFFF; tLastClock[0] = '\0'; tLastBot[0] = '\0';
+  tLastCo2 = 0xFFFF; tLastStale = false; tLastClock[0] = '\0'; tLastBot[0] = '\0';
   tft.fillScreen(GC9A01A_BLACK);
   for (int r = 115; r <= 118; r++)
     tft.drawCircle(120, 120, r, tft.color565(0x5A, 0x4E, 0x1E));   // dimmed ring
@@ -393,11 +400,15 @@ static void timeViewEnter() {
 }
 
 static void renderTimeView() {
-  // small CO2 (tier dot + number) up top
-  if (gCo2 != tLastCo2) {
+  // small CO2 (tier dot + number) up top — greyed when stale/absent, so a
+  // frozen number can't read as live on this view either
+  if (gCo2 != tLastCo2 || gStale != tLastStale) {
     const char* label; uint16_t tier = co2Color(gCo2, &label);
+    if (gCo2 == 0 || gStale) tier = cGrey();     // no reading / stale: neutral dot
     tft.fillRect(40, 56, 160, 22, GC9A01A_BLACK);
-    char num[8]; snprintf(num, sizeof(num), "%u", gCo2);
+    char num[8];
+    if (gCo2 == 0) strcpy(num, "--");
+    else           snprintf(num, sizeof(num), "%u", gCo2);
     tft.setFont(&FreeSans12pt7b);
     tft.setTextSize(1);
     int16_t x1, y1; uint16_t w, h;
@@ -405,10 +416,11 @@ static void renderTimeView() {
     const int dot = 10, gap = 8;
     int x0 = 120 - (dot + gap + (int)w) / 2;
     tft.fillCircle(x0 + dot / 2, 67, dot / 2, tier);
-    tft.setTextColor(cSec());
+    tft.setTextColor((gCo2 == 0 || gStale) ? cFaint() : cSec());
     tft.setCursor(x0 + dot + gap - x1, 67 - h / 2 - y1);
     tft.print(num);
     tLastCo2 = gCo2;
+    tLastStale = gStale;
   }
   // big clock
   char clk[8];
@@ -493,7 +505,8 @@ static void renderDiagView() {
   CalState cal = calState(gTimeValid, gNowEpoch);
   if (cal == CAL_UNKNOWN) strcpy(line, "cal: not set");
   else {
-    uint32_t days = (gNowEpoch - settings::cfg.lastFrcEpoch) / 86400UL;
+    uint32_t days = (gNowEpoch > settings::cfg.lastFrcEpoch)
+                      ? (gNowEpoch - settings::cfg.lastFrcEpoch) / 86400UL : 0;
     snprintf(line, sizeof(line), "cal: %ud ago", (unsigned)days);
   }
   diagRow(5, 170, cSec(), line);
@@ -520,9 +533,20 @@ static void renderView() {
       if (gCo2 != 0)
         renderMain(gCo2, gTempC, gHum, gTimeValid, gHh, gMm,
                    calState(gTimeValid, gNowEpoch));
-      else if (gSensorFault && !mFaultDrawn) {   // never produced a reading -> fault
-        zoneC(&FreeSans12pt7b, 120, 102, 200, 26, GC9A01A_RED, "no sensor");
-        mFaultDrawn = true;
+      else {                                     // no reading yet: warming up or fault
+        if (gSensorFault && !mFaultDrawn) {
+          zoneC(&FreeSans12pt7b, 120, 102, 200, 26, GC9A01A_RED, "no sensor");
+          mFaultDrawn = true;
+        }
+        // the RTC and gauge still work — keep the clock and battery live
+        char ts[8];
+        if (gTimeValid) snprintf(ts, sizeof(ts), "%02d:%02d", gHh, gMm);
+        else            strcpy(ts, "--:--");
+        if (strcmp(ts, mLastTime) != 0) {
+          zoneC(&FreeSans12pt7b, 120, 56, 90, 24, gTimeValid ? cSec() : cFaint(), ts);
+          strcpy(mLastTime, ts);
+        }
+        updateBattGlyph();
       }
       break;
   }
@@ -637,10 +661,11 @@ static void commitFRC() {
   gFrcOk   = false;
   gFrcLast = gCo2;
 
-  if (gStale) {                          // sensor went quiet during equilibration
+  if (gCo2 == 0 || gStale) {             // no reading at all, or it went quiet
     gFrcFail = FRCF_SENSOR;
-    Serial.println(F("FRC refused: reading is stale"));
-    datalog::event(gTimeValid ? gNowEpoch : 0, "frc refused: stale sensor");
+    Serial.println(gCo2 == 0 ? F("FRC refused: no reading") : F("FRC refused: reading is stale"));
+    datalog::event(gTimeValid ? gNowEpoch : 0,
+                   gCo2 == 0 ? "frc refused: no reading" : "frc refused: stale sensor");
     return;
   }
 
@@ -712,7 +737,10 @@ static void enterMain(uint32_t now) {
   gState = ST_MAIN;
   gStateStart = now;
   tft.setRotation(settings::cfg.rotation);            // apply any settings change
-  setBacklight(settings::cfg.brightness);             // auto-brightness re-takes over if on
+  // restore the CURRENT auto level, not fixed duty — else every modal exit
+  // flashes full-bright in a dark room before the slew catches up
+  setBacklight((hasLux && settings::cfg.autoBrightness) ? gBrightness
+                                                        : settings::cfg.brightness);
   enterView();
   renderView();
 }
@@ -793,7 +821,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 20: audit fixes (FRC stale gate, escaping, fault, log realign)\n"));
+  Serial.println(F("Phase 21.1: second-audit fixes (auth 404, sync restart, NaN, stale views)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -919,7 +947,16 @@ void loop() {
     gStale = (gCo2 != 0) && (now - gLastReadMs > (uint32_t)SENSOR_STALE_SEC * 1000UL);
     gSensorFault = (gCo2 == 0) && (now > (uint32_t)SENSOR_FAULT_BOOT_SEC * 1000UL);
 
-    if (hasBatt) { gBattV = maxlipo.cellVoltage(); gBattPct = maxlipo.cellPercent(); }
+    if (hasBatt) {
+      // Library returns NAN if the gauge stops ACKing (loose QT / brownout):
+      // keep the last good values rather than propagating NaN to the UI.
+      float v = maxlipo.cellVoltage(), p = maxlipo.cellPercent(), r = maxlipo.chargeRate();
+      if (!isnan(v) && !isnan(p)) {
+        gBattV    = v;
+        gBattPct  = (p > 100.0f) ? 100.0f : (p < 0.0f ? 0.0f : p);  // full cell reads 101-104%
+        gBattRate = isnan(r) ? 0.0f : r;
+      }
+    }
 
     // Push live state to the portal for the /diag page.
     portal::Telemetry tel;
@@ -929,7 +966,7 @@ void loop() {
     tel.timeValid = gTimeValid; tel.nowEpoch = gNowEpoch;
     tel.lux = gLux; tel.brightness = gBrightness;
     tel.frcValid = gFrcOk; tel.frcCorrPpm = gFrcOk ? (int)gFrcCorr - 0x8000 : 0;
-    tel.hasBatt = hasBatt; tel.battPct = gBattPct; tel.battV = gBattV;
+    tel.hasBatt = hasBatt; tel.battPct = gBattPct; tel.battV = gBattV; tel.battRate = gBattRate;
     tel.resetReason = resetReasonStr();
     portal::setTelemetry(tel);
 
