@@ -54,6 +54,7 @@ const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\
   "<style>" \
   "body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#f4f4f3;color:#222}" \
   ".wrap{max-width:480px;margin:0 auto;padding:18px 16px 28px}" \
+  ".wrap.wide{max-width:920px}" \
   "h1{font-size:18px;font-weight:500;margin:2px 0 12px}" \
   ".nav{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;margin-bottom:14px}" \
   ".nav a{color:#159b90;text-decoration:none}" \
@@ -92,32 +93,48 @@ const char* HISTORY_PAGE =
   "<meta name=viewport content='width=device-width,initial-scale=1'>"
   "<title>stuffy history</title>"
   UI_CSS
-  "<div class=wrap><h1>History</h1>"
+  "<div class='wrap wide'><h1>History</h1>"
   "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
   "<a href='/events'>Event log</a><a href='/data.csv'>Download CSV</a></div>"
   "<div class=range><button onclick='load(24,this)'>24 h</button>"
   "<button onclick='load(168,this)'>7 d</button>"
   "<button onclick='load(0,this)'>All</button>"
-  "<span id=n class=s></span></div>"
-  "<div class=card><canvas id=c height=240></canvas></div></div>"
+  "<label style='display:flex;align-items:center;gap:6px;font-size:13px;color:#555;margin:0'>"
+  "<input type=checkbox id=sm onchange='draw()' style='width:16px;height:16px;margin:0;padding:0'>"
+  "smooth</label>"
+  "<span id=n class=s style='margin-left:8px'></span></div>"
+  "<div class=card><div style='position:relative;height:340px'>"
+  "<canvas id=c></canvas></div></div></div>"
   "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>"
-  "<script>let ch;"
+  "<script>let ch,raw=[];"
+  // 5-point centered moving average — display only; the log/CSV stay raw
+  "function smv(a){const r=[];for(let i=0;i<a.length;i++){let s=0,n=0;"
+  "for(let j=Math.max(0,i-2);j<=Math.min(a.length-1,i+2);j++){s+=a[j];n++}"
+  "r.push(Math.round(s/n*10)/10)}return r}"
+  "function draw(){"
+  "const on=document.getElementById('sm').checked;"
+  "try{localStorage.sm=on?'1':'0'}catch(e){}"
+  "document.getElementById('n').textContent=raw.length+' points';"
+  "const lab=raw.map(x=>new Date(x[0]*1000).toLocaleString([],"
+  "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));"
+  "let co=raw.map(x=>x[1]),te=raw.map(x=>x[2]);"
+  "if(on){co=smv(co);te=smv(te);}"
+  "const sfx=on?' (smoothed)':'';"
+  "if(ch)ch.destroy();"
+  "ch=new Chart(document.getElementById('c'),{type:'line',data:{labels:lab,datasets:["
+  "{label:'CO2 ppm'+sfx,data:co,borderColor:'#e2554b',pointRadius:0,borderWidth:2,tension:.25,yAxisID:'y'},"
+  "{label:'temp'+sfx,data:te,borderColor:'#3E8BF0',pointRadius:0,borderWidth:1,tension:.25,yAxisID:'y2'}]},"
+  "options:{animation:false,maintainAspectRatio:false,"
+  "interaction:{mode:'index',intersect:false},"
+  "plugins:{legend:{labels:{boxWidth:12,font:{size:11}}}},"
+  "scales:{x:{ticks:{maxTicksLimit:12,font:{size:10}}},"
+  "y:{position:'left',grace:'8%',title:{display:true,text:'ppm'}},"
+  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});}"
   "function load(h,btn){"
   "document.querySelectorAll('.range button').forEach(b=>b.className='');"
   "if(btn)btn.className='on';"
-  "fetch('/data.json?h='+h).then(r=>r.json()).then(d=>{"
-  "document.getElementById('n').textContent=d.length+' points';"
-  "const lab=d.map(x=>new Date(x[0]*1000).toLocaleString([],"
-  "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));"
-  "if(ch)ch.destroy();"
-  "ch=new Chart(document.getElementById('c'),{type:'line',data:{labels:lab,datasets:["
-  "{label:'CO2 ppm',data:d.map(x=>x[1]),borderColor:'#e2554b',pointRadius:0,borderWidth:2,yAxisID:'y'},"
-  "{label:'temp',data:d.map(x=>x[2]),borderColor:'#3E8BF0',pointRadius:0,borderWidth:1,yAxisID:'y2'}]},"
-  "options:{animation:false,interaction:{mode:'index',intersect:false},"
-  "plugins:{legend:{labels:{boxWidth:12,font:{size:11}}}},"
-  "scales:{x:{ticks:{maxTicksLimit:8,font:{size:10}}},"
-  "y:{position:'left',grace:'8%',title:{display:true,text:'ppm'}},"
-  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});});}"
+  "fetch('/data.json?h='+h).then(r=>r.json()).then(d=>{raw=d;draw();});}"
+  "try{document.getElementById('sm').checked=localStorage.sm=='1'}catch(e){}"
   "load(24,document.querySelectorAll('.range button')[0]);</script>";
 
 // --- html builders ---
@@ -783,6 +800,10 @@ void setupRoutes() {
     server.on("/diag", handleDiag);
     server.on("/diag.json", handleDiagJson);
     server.on("/wipe", HTTP_POST, handleWipe);
+    // fast 404 for the favicon: without this every page view triggers a
+    // redirect to "/" and a second full settings-page build on this
+    // single-threaded server (doubling the per-click work)
+    server.on("/favicon.ico", []() { server.send(404, "text/plain", ""); });
     server.onNotFound(handleNotFound);
     ElegantOTA.begin(&server);               // serves /update with a progress UI
   }
@@ -813,6 +834,8 @@ bool portal::startSTA() {
   if (!settings::cfg.staEnabled || settings::cfg.wifiSsid[0] == '\0') return false;
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);   // modem power-save adds ~1s first-packet lag per click;
+                          // costs ~50mA, fine on USB (battery profile runs WiFi off)
   WiFi.setHostname(settings::cfg.hostname);
   WiFi.begin(settings::cfg.wifiSsid, settings::cfg.wifiPass);
   uint32_t t0 = millis();
