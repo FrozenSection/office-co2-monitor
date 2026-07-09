@@ -72,7 +72,7 @@ static void eqPush(uint16_t co2) {
 
 enum CalState { CAL_UNKNOWN, CAL_FRESH, CAL_AGING, CAL_STALE, CAL_OVERDUE };
 enum AppState { ST_MAIN, ST_CONFIRM, ST_EQUIL, ST_RESULT, ST_WIFI };
-enum BtnEv    { BTN_NONE, BTN_TAP, BTN_DBL, BTN_HOLD };
+enum BtnEv    { BTN_NONE, BTN_TAP, BTN_DBL, BTN_HOLD, BTN_XHOLD };
 enum View     { VIEW_CO2, VIEW_TIME, VIEW_DIAG, VIEW_COUNT };
 
 static AppState gState      = ST_MAIN;
@@ -750,7 +750,7 @@ static void enterMain(uint32_t now) {
 static BtnEv pollButton() {
   static bool     pStable = false, pRaw = false;
   static uint32_t lastChange = 0, pressStart = 0, lastRelease = 0;
-  static bool     longFired = false;
+  static bool     longFired = false, xFired = false;
   static uint8_t  taps = 0;
   uint32_t now = millis();
 
@@ -759,7 +759,7 @@ static BtnEv pollButton() {
 
   if (now - lastChange >= BTN_DEBOUNCE_MS && pressed != pStable) {
     pStable = pressed;
-    if (pStable) { pressStart = now; longFired = false; }
+    if (pStable) { pressStart = now; longFired = false; xFired = false; }
     else if (!longFired) {                 // short release = a tap
       taps++;
       lastRelease = now;
@@ -769,6 +769,10 @@ static BtnEv pollButton() {
   if (pStable && !longFired && (now - pressStart) >= BTN_HOLD_MS) {
     longFired = true; taps = 0;
     return BTN_HOLD;
+  }
+  if (pStable && longFired && !xFired && (now - pressStart) >= BTN_XHOLD_MS) {
+    xFired = true;                         // ultra-hold: ride through the 3s hold
+    return BTN_XHOLD;
   }
   if (taps == 1 && !pStable && (now - lastRelease) >= BTN_DBL_MS) {
     taps = 0;
@@ -911,6 +915,16 @@ void loop() {
   updateLuxAndBrightness();
   BtnEv ev = pollButton();
   uint32_t now = millis();
+
+  // 10s ultra-hold: reboot from any screen — the enclosure has no power switch,
+  // so this is the no-tools way to restart (rides through the 3s WiFi hold).
+  if (ev == BTN_XHOLD) {
+    Serial.println(F("button: 10s hold -> restart"));
+    tft.fillScreen(GC9A01A_BLACK);
+    drawTextC(&FreeSansBold12pt7b, 120, 120, GC9A01A_WHITE, "restarting");
+    delay(600);
+    ESP.restart();
+  }
 
   // Keep the web server (AP or home-WiFi STA) responsive, and adopt NTP time.
   if (portal::apActive() || portal::staActive()) {

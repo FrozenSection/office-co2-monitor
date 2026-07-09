@@ -50,6 +50,8 @@ this as a "should I open a window / take a walk" indicator, not a life-safety de
 
 ## Documentation
 
+- [docs/manual.md](docs/manual.md) — **user manual**: button gestures, screens & cues,
+  recalibration walk, web pages, checklists, troubleshooting
 - [docs/wiring.md](docs/wiring.md) — pinouts and wire colors
 - [docs/calibration.md](docs/calibration.md) — the fresh-air walk, the FRC quality gate,
   reference value, altitude, and profiles

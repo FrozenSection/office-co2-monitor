@@ -26,6 +26,7 @@
 #define BTN_DEBOUNCE_MS     25
 #define BTN_DBL_MS          350   // double-tap window
 #define BTN_HOLD_MS         3000  // hold this long -> enter WiFi config
+#define BTN_XHOLD_MS        10000 // keep holding -> reboot (no power switch in enclosure)
 #define RECAL_CONFIRM_SEC   10    // confirm screen auto-cancels after this
 #define RECAL_RESULT_SEC    6     // result screen dwell before returning
 
