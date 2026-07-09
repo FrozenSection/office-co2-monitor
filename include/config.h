@@ -72,6 +72,9 @@
 
 // Data logging (internal LittleFS)
 #define DEFAULT_LOG_INTERVAL_SEC 300   // sample period (tunable in settings)
+#define LOG_BOOT_QUIET_SEC       300   // no logging this long after boot: a reboot
+                                       // (esp. OTA) leaves a real heat pulse in the
+                                       // enclosure that reads as hot/dry garbage rows
 #define LOG_MAX_RECS_PER_FILE    8000  // ~72KB/file; 2 files -> ~16k records
 #define LOG_GRAPH_MAX_POINTS     600   // downsample the chart to this many
 

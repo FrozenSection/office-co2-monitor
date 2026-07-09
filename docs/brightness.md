@@ -37,21 +37,22 @@ All live under **Settings → Display**.
 | Setting | Meaning |
 |---|---|
 | **Auto-brightness** | Track ambient light. Requires a VEML7700; ignored if absent. |
-| **Brightness** | Fixed perceptual level (0–255) used when auto is off or no sensor. |
-| **Auto min / max** | Perceptual floor / ceiling for the auto curve (0–255). |
+| **Brightness** | Fixed perceptual level (0–100%) used when auto is off or no sensor. |
+| **Auto min / max** | Perceptual floor / ceiling for the auto curve (0–100%). |
 | **Lux low / high** | Ambient-light endpoints. Low → min, high → max, mapped on a log axis. `low` must be ≥ 1. |
 | **Dimming gamma** | Curve shape, stored ×10 (`22` = 2.2). Higher = dimmer, gentler low end. |
+| **Brightness trim** | Live ±50% nudge on the whole auto curve — the "right policy, wrong notch" knob. Applies on Save. |
 
 ## Effects to know
 
 - **Min/max are perceptual, not raw duty.** Because of the gamma curve, a given
   `brightnessMin` renders **much dimmer in actual light** than a plain linear map would.
   Great for a dark night floor — but if it's *too* dark to read, **raise
-  `brightnessMin`** (≈30–45 is a usual readable floor).
+  `brightnessMin`** (≈12–18% is a usual readable floor).
 - **Never fully dark.** Any non-zero level keeps at least 1/4095 of duty, so the floor
   is dim but not black.
-- **Diagnostics `br %`** reports the **perceptual level** (0–100% of the 0–255 scale),
-  i.e. what the min/max endpoints set — not the raw PWM duty.
+- **Diagnostics `br %`** reports the **perceptual level** (same 0–100% scale as the
+  settings), i.e. where the curve currently sits — not the raw PWM duty.
 - **Lux changes are smoothed twice** — an exponential average on the lux reading, then a
   perceptual slew on the level — so flicker and sudden jumps are damped.
 
@@ -64,8 +65,8 @@ matters little when you live in the top half of the range.
 **Bedroom nightstand (where this shines).**
 1. Set **Lux low ≈ 2–3**, **Lux high ≈ 400** so the curve stretches from near-dark to a
    bright room.
-2. Pick **Auto min** for how dim you want it at night (start ~20–35; lower is dimmer),
-   and **Auto max** for daytime (often 255).
+2. Pick **Auto min** for how dim you want it at night (start ~8–14%; lower is dimmer),
+   and **Auto max** for daytime (often 100%).
 3. Tune **Gamma** to taste: **2.2** is a good start; push to **2.6–2.8** for an even
    gentler low end, drop toward **1.8** if the whole range feels too dark.
 4. Test in an actually-dark room — the low end is exactly where the curve earns its

@@ -70,7 +70,7 @@ static void eqPush(uint16_t co2) {
   if (gEqN < 8) gEqN++;
 }
 
-enum CalState { CAL_UNKNOWN, CAL_FRESH, CAL_AGING, CAL_STALE, CAL_OVERDUE };
+enum CalState { CAL_UNKNOWN, CAL_FRESH, CAL_AGING, CAL_STALE, CAL_OVERDUE, CAL_ASC };
 enum AppState { ST_MAIN, ST_CONFIRM, ST_EQUIL, ST_RESULT, ST_WIFI };
 enum BtnEv    { BTN_NONE, BTN_TAP, BTN_DBL, BTN_HOLD, BTN_XHOLD };
 enum View     { VIEW_CO2, VIEW_TIME, VIEW_DIAG, VIEW_COUNT };
@@ -149,6 +149,9 @@ static uint16_t co2Color(uint16_t co2, const char** label) {
 }
 
 static CalState calState(bool timeValid, uint32_t nowEpoch) {
+  // Ventilated profile: ASC recalibrates the sensor on its own (~weekly), so
+  // manual-FRC age isn't a trust signal — no dot, no greying, no escalation.
+  if (settings::ascEnabled()) return CAL_ASC;
   if (!timeValid || settings::cfg.lastFrcEpoch == 0) return CAL_UNKNOWN;
   // guard: FRC done on a fast clock, then NTP corrects backwards -> would underflow
   uint32_t days = (nowEpoch > settings::cfg.lastFrcEpoch)
@@ -301,16 +304,34 @@ static void drawBattery(int cx, int cy, int pct, uint16_t color) {
   if (fw > 0) tft.fillRect(x + 2, y + 2, fw, h - 4, color);
 }
 
-// Battery glyph — top center, mirrors the cal dot; only when a gauge is present.
+// True when we're clearly on external (USB) power: charging, or full-and-held.
+// Inferred from the fuel gauge, so it lags a minute or two after (un)plugging.
+static bool onUsbPower() {
+  if (!hasBatt) return false;
+  return (gBattRate > 1.0f) || (gBattV >= 4.10f && gBattRate > -1.0f);
+}
+
+// Small plug glyph: two prongs, body, cord — shown instead of the battery on USB.
+static void drawPlug(int cx, int cy, uint16_t color) {
+  tft.fillRect(cx - 4, cy - 9, 3, 5, color);
+  tft.fillRect(cx + 2, cy - 9, 3, 5, color);
+  tft.fillRect(cx - 6, cy - 4, 13, 8, color);
+  tft.drawFastVLine(cx, cy + 4, 5, color);
+}
+
+// Power glyph — top center, mirrors the cal dot; only when a gauge is present.
+// Plug on USB power, battery (with fill + color) when actually draining.
 // Shared by the normal main view and the sensor-fault screen.
 static void updateBattGlyph() {
   if (!hasBatt) return;
   int p = (int)(gBattPct + 0.5f);
   if (p < 0) p = 0; else if (p > 100) p = 100;
-  if (p != mLastBatt) {
-    tft.fillRect(102, 16, 36, 16, GC9A01A_BLACK);
-    drawBattery(120, 24, p, battColor(p));
-    mLastBatt = p;
+  int key = onUsbPower() ? 999 : p;          // 999 = plug
+  if (key != mLastBatt) {
+    tft.fillRect(102, 13, 36, 22, GC9A01A_BLACK);
+    if (key == 999) drawPlug(120, 24, cSec());
+    else            drawBattery(120, 24, p, battColor(p));
+    mLastBatt = key;
   }
 }
 
@@ -503,7 +524,8 @@ static void renderDiagView() {
 
   // calibration
   CalState cal = calState(gTimeValid, gNowEpoch);
-  if (cal == CAL_UNKNOWN) strcpy(line, "cal: not set");
+  if (cal == CAL_ASC)          strcpy(line, "cal: auto (asc)");
+  else if (cal == CAL_UNKNOWN) strcpy(line, "cal: not set");
   else {
     uint32_t days = (gNowEpoch > settings::cfg.lastFrcEpoch)
                       ? (gNowEpoch - settings::cfg.lastFrcEpoch) / 86400UL : 0;
@@ -808,6 +830,9 @@ static void updateLuxAndBrightness() {
   // Perceptual target between the min/max endpoints; setBacklight() applies gamma.
   float target = settings::cfg.brightnessMin +
                  p * (settings::cfg.brightnessMax - settings::cfg.brightnessMin);
+  // user trim: quick "brighter/dimmer than I want right here" nudge on the curve
+  target += settings::cfg.brightnessBias * 2.55f;
+  if (target < 1) target = 1; else if (target > 255) target = 255;
 
   // Slew in PERCEPTUAL space so fades feel even from dim to bright.
   if (level < 0) level = target;
@@ -869,6 +894,8 @@ void setup() {
   } else {
     Serial.println(F("DS3231: not found"));
   }
+  refreshTime();   // know the clock state before the first NTP result lands,
+                   // so a routine boot sync isn't logged as "clock set"
 
   scd4x.begin(Wire, I2C_ADDR_SCD41);
   logScdError("stop", scd4x.stopPeriodicMeasurement());
@@ -920,6 +947,7 @@ void loop() {
   // so this is the no-tools way to restart (rides through the 3s WiFi hold).
   if (ev == BTN_XHOLD) {
     Serial.println(F("button: 10s hold -> restart"));
+    datalog::event(gTimeValid ? gNowEpoch : 0, "restart via button");
     tft.fillScreen(GC9A01A_BLACK);
     drawTextC(&FreeSansBold12pt7b, 120, 120, GC9A01A_WHITE, "restarting");
     delay(600);
@@ -931,9 +959,16 @@ void loop() {
     portal::handle();
     uint32_t epoch;
     if (portal::consumeSynced(epoch)) {
+      int32_t drift = (int32_t)(epoch - gNowEpoch);
       rtc.adjust(DateTime(epoch));
       setenv("TZ", settings::cfg.timezone, 1); tzset();
       Serial.printf("NTP: RTC set, UTC epoch %u\n", (unsigned)epoch);
+      if (!gTimeValid)                    datalog::event(epoch, "clock set via ntp");
+      else if (drift > 5 || drift < -5) {
+        char ev[40];
+        snprintf(ev, sizeof(ev), "clock adjusted %+lds via ntp", (long)drift);
+        datalog::event(epoch, ev);
+      }
     }
   }
 
@@ -945,6 +980,12 @@ void loop() {
     if (scd4x.getDataReadyStatus(ready) == 0 && ready) {
       uint16_t co2 = 0; float t = 0, h = 0;
       if (scd4x.readMeasurement(co2, t, h) == 0 && co2 != 0) {
+        // The SCD-41's first samples after a measurement (re)start read hot/dry
+        // (Sensirion: discard) — and the logger stamps the first reading after
+        // boot, so every reboot was logging one garbage row. Skip them.
+        static uint8_t discard = 2;
+        if (discard) { discard--; Serial.println(F("SCD-41: discarding warm-up sample")); }
+        else {
         gCo2 = co2; gTempC = t; gHum = h;
         gLastReadMs = now;
         if (gState == ST_EQUIL) eqPush(co2);   // feed the FRC stability gate
@@ -952,6 +993,7 @@ void loop() {
           Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%  lux=%.0f\n", co2, t, h, gLux);
         else
           Serial.printf("CO2=%u ppm  T=%.1fC  RH=%.0f%%\n", co2, t, h);
+        }
       }
     }
     refreshTime();
@@ -960,6 +1002,17 @@ void loop() {
     // on screen but greyed, so a frozen number can't read as live).
     gStale = (gCo2 != 0) && (now - gLastReadMs > (uint32_t)SENSOR_STALE_SEC * 1000UL);
     gSensorFault = (gCo2 == 0) && (now > (uint32_t)SENSOR_FAULT_BOOT_SEC * 1000UL);
+
+    // Log sensor-health transitions for post-mortems on the sealed unit.
+    static bool prevStale = false, faultLogged = false;
+    if (gStale != prevStale) {
+      datalog::event(gTimeValid ? gNowEpoch : 0, gStale ? "sensor stale" : "sensor recovered");
+      prevStale = gStale;
+    }
+    if (gSensorFault && !faultLogged) {
+      faultLogged = true;
+      datalog::event(gTimeValid ? gNowEpoch : 0, "sensor missing (no first reading)");
+    }
 
     if (hasBatt) {
       // Library returns NAN if the gauge stops ACKing (loose QT / brownout):
@@ -996,10 +1049,11 @@ void loop() {
       }
     }
 
-    // Periodic data log — needs a fresh reading and a real (RTC) clock.
+    // Periodic data log — needs a fresh reading, a real (RTC) clock, and the
+    // post-boot heat pulse to have dissipated.
     static uint32_t lastLog = 0;
     static bool     loggedFirst = false;
-    if (gCo2 != 0 && gTimeValid) {
+    if (gCo2 != 0 && gTimeValid && now >= (uint32_t)LOG_BOOT_QUIET_SEC * 1000UL) {
       uint32_t ivMs = (uint32_t)settings::cfg.logIntervalSec * 1000;
       if (!loggedFirst || now - lastLog >= ivMs) {
         loggedFirst = true;

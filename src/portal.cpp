@@ -91,9 +91,14 @@ const char* ROT_LABELS[4] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\
 const char* HISTORY_PAGE =
   "<!doctype html><meta charset=utf-8>"
   "<meta name=viewport content='width=device-width,initial-scale=1'>"
-  "<title>stuffy history</title>"
+  "<title>stuffy data</title>"
   UI_CSS
-  "<div class='wrap wide'><h1>History</h1>"
+  "<style>#tb{width:100%;border-collapse:collapse;font-size:12px}"
+  "#tb td,#tb th{padding:4px 8px;border-bottom:1px solid #f0f0ec;text-align:right;"
+  "font-variant-numeric:tabular-nums}"
+  "#tb td:first-child,#tb th:first-child{text-align:left}"
+  "#tb th{color:#777;font-weight:500}</style>"
+  "<div class='wrap wide'><h1>Data</h1>"
   "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
   "<a href='/events'>Event log</a><a href='/data.csv'>Download CSV</a></div>"
   "<div class=range><button onclick='load(24,this)'>24 h</button>"
@@ -104,7 +109,11 @@ const char* HISTORY_PAGE =
   "smooth</label>"
   "<span id=n class=s style='margin-left:8px'></span></div>"
   "<div class=card><div style='position:relative;height:340px'>"
-  "<canvas id=c></canvas></div></div></div>"
+  "<canvas id=c></canvas></div></div>"
+  "<div class=card><details><summary style='cursor:pointer;font-size:13px;color:#159b90'>"
+  "Readings <span id=tn class=s></span></summary>"
+  "<div style='overflow-x:auto;margin-top:8px'><table id=tb></table></div>"
+  "</details></div></div>"
   "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>"
   "<script>let ch,raw=[];"
   // 5-point centered moving average — display only; the log/CSV stay raw
@@ -129,7 +138,18 @@ const char* HISTORY_PAGE =
   "plugins:{legend:{labels:{boxWidth:12,font:{size:11}}}},"
   "scales:{x:{ticks:{maxTicksLimit:12,font:{size:10}}},"
   "y:{position:'left',grace:'8%',title:{display:true,text:'ppm'}},"
-  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});}"
+  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});"
+  "tbl();}"
+  // table always shows RAW values (newest first), independent of the smooth toggle
+  "function tbl(){const m=Math.min(raw.length,100);"
+  "let s='<tr><th>time</th><th>CO2 ppm</th><th>temp</th><th>RH %</th></tr>';"
+  "for(let i=raw.length-1;i>=raw.length-m;i--){const x=raw[i];"
+  "s+='<tr><td>'+new Date(x[0]*1000).toLocaleString([],"
+  "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})+'</td><td>'"
+  "+x[1]+'</td><td>'+x[2]+'</td><td>'+x[3]+'</td></tr>';}"
+  "document.getElementById('tb').innerHTML=s;"
+  "document.getElementById('tn').textContent="
+  "raw.length>m?'\xC2\xB7 latest '+m+' of '+raw.length:'';}"
   "function load(h,btn){"
   "document.querySelectorAll('.range button').forEach(b=>b.className='');"
   "if(btn)btn.className='on';"
@@ -175,6 +195,10 @@ String pair3(const char* label, const char* hint,
   if (hint && *hint) { s += "<div class=hint>"; s += hint; s += "</div>"; }
   return s + "</div>";
 }
+
+// Brightness is stored 0-255 but shown as 0-100% (matches trim + diag readout).
+int toPct(uint8_t v)      { return (v * 100 + 127) / 255; }
+uint8_t fromPct(long p)   { p = constrain(p, 0, 100); return (uint8_t)((p * 255 + 50) / 100); }
 
 String num(const char* name, long v) {
   char b[96];
@@ -230,23 +254,31 @@ String pageHtml() {
     "<title>stuffy settings</title>"
     UI_CSS
     "<div class=wrap><h1>stuffy settings</h1>"
-    "<div class=nav><a href='/diag'>Diagnostics</a><a href='/history'>History</a>"
+    "<div class=nav><a href='/diag'>Diagnostics</a><a href='/history'>Data</a>"
     "<a href='/events'>Event log</a><a href='/update'>Firmware</a></div>"
     "<form method=POST>";
 
   // DISPLAY
   String disp;
-  disp += fieldH("Fixed brightness", num("bri", c.brightness),
-                 "0\xE2\x80\x93""255, used when auto-brightness is off");
+  disp += fieldH("Fixed brightness (%)", num("bri", toPct(c.brightness)),
+                 "0\xE2\x80\x93""100, used when auto-brightness is off");
   disp += check("autob", c.autoBrightness, "Auto-brightness (needs lux sensor)");
-  disp += pair2("Auto brightness range", "",
-                "min (night)", num("brmin", c.brightnessMin),
-                "max (day)",   num("brmax", c.brightnessMax));
+  disp += pair2("Auto brightness range (%)", "",
+                "min (night)", num("brmin", toPct(c.brightnessMin)),
+                "max (day)",   num("brmax", toPct(c.brightnessMax)));
   disp += pair2("Ambient light range", "dimmer below low, brightest above high",
                 "lux low",  num("luxlo", c.luxLow),
                 "lux high", num("luxhi", c.luxHigh));
   disp += fieldH("Dimming gamma", num("gam", c.gammaX10),
                  "\xC3\x97""0.1 (22 = 2.2). Higher = gentler low end");
+  disp += fieldH("Brightness trim (auto mode)",
+                 "<div class=row style='align-items:center'>"
+                 "<input type=range name=bias min=-50 max=50 style='flex:1;padding:0' value='"
+                 + String((int)c.brightnessBias) + "' "
+                 "oninput=\"document.getElementById('bv').textContent=this.value\">"
+                 "<span id=bv style='flex:none;min-width:36px;text-align:right;font-size:14px'>"
+                 + String((int)c.brightnessBias) + "</span></div>",
+                 "Quick \xC2\xB1""50% nudge on the auto curve \xE2\x80\x94 applies on Save, no restart");
   disp += fieldH("Temperature unit",
                  "<select name=unit>" + opt("1", unitCur.c_str(), "Fahrenheit")
                  + opt("0", unitCur.c_str(), "Celsius") + "</select>");
@@ -349,6 +381,7 @@ bool doNtp() {
 
 void applyFormToSettings() {
   Settings& c = settings::cfg;
+  uint8_t prevProfile = c.profile;
   strlcpy(c.wifiSsid, server.arg("ssid").c_str(), sizeof(c.wifiSsid));
   String pass = server.arg("pass");
   if (pass.length()) strlcpy(c.wifiPass, pass.c_str(), sizeof(c.wifiPass));
@@ -368,10 +401,10 @@ void applyFormToSettings() {
   String wpw = server.arg("webpw");
   if (wpw.length()) strlcpy(c.webPassword, wpw.c_str(), sizeof(c.webPassword));
 
-  c.brightness     = constrain(server.arg("bri").toInt(), 0, 255);
+  c.brightness     = fromPct(server.arg("bri").toInt());
   c.autoBrightness = server.hasArg("autob");
-  c.brightnessMin  = constrain(server.arg("brmin").toInt(), 0, 255);
-  c.brightnessMax  = constrain(server.arg("brmax").toInt(), 0, 255);
+  c.brightnessMin  = fromPct(server.arg("brmin").toInt());
+  c.brightnessMax  = fromPct(server.arg("brmax").toInt());
   c.luxLow         = constrain(server.arg("luxlo").toInt(), 0, 65000);
   c.luxHigh        = constrain(server.arg("luxhi").toInt(), 1, 65000);
   c.tempUnitF      = server.arg("unit").toInt() != 0;
@@ -387,6 +420,7 @@ void applyFormToSettings() {
   c.altitudeM      = constrain(server.arg("alt").toInt(), 0, 9000);
   c.tempOffsetC10  = constrain(server.arg("toff").toInt(), 0, 200);
   c.gammaX10       = constrain(server.arg("gam").toInt(), 10, 30);
+  c.brightnessBias = constrain(server.arg("bias").toInt(), -50, 50);
 
   // enforce ordering / sane relationships so labels can't contradict
   if (c.aqFair <= c.aqGood)               c.aqFair = c.aqGood + 1;
@@ -398,6 +432,14 @@ void applyFormToSettings() {
   if (c.luxHigh <= c.luxLow)              c.luxHigh = c.luxLow + 1;
 
   settings::save();
+  // audit trail: profile changes swap the calibration trust model, so they get
+  // their own event; everything else is a generic save marker
+  if (c.profile != prevProfile)
+    datalog::event(gTelem.nowEpoch, c.profile == PROFILE_VENTILATED
+                                      ? "profile -> ventilated (asc on)"
+                                      : "profile -> sealed (asc off)");
+  else
+    datalog::event(gTelem.nowEpoch, "settings saved via web");
   // keep OTA auth in step with a password set after boot (routes register once)
   if (c.webPassword[0]) ElegantOTA.setAuth("admin", c.webPassword);
   // apply a timezone change immediately (clock display, event log, /diag) —
@@ -443,6 +485,7 @@ void restartWith(const char* title, const char* note) {
   h += note;
   h += "</div></div></div>";
   server.send(200, "text/html", h);
+  datalog::event(gTelem.nowEpoch, "restart: wifi change");
   delay(500);
   ESP.restart();
 }
@@ -520,6 +563,7 @@ void handleSync() {
 
 void handleRestart() {
   if (!authed()) return;
+  datalog::event(gTelem.nowEpoch, "restart via web");
   server.send(200, "text/html",
               "<!doctype html><meta charset=utf-8>"
               "<meta http-equiv=refresh content='7;url=/'>"
@@ -613,7 +657,7 @@ void handleEvents() {
     "<title>stuffy events</title>" UI_CSS
     "<div class=wrap><h1>Event log</h1>"
     "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
-    "<a href='/history'>History</a></div><div class=card>");
+    "<a href='/history'>Data</a></div><div class=card>");
 
   // Newest-first with local timestamps; tint failures/refusals.
   String buf; buf.reserve(2048);
@@ -661,7 +705,7 @@ void handleDiag() {
     "<h1 style='margin:0'>Diagnostics</h1>"
     "<span class=s style='color:#159b90'>live \xC2\xB7 5s</span></div>"
     "<div class=nav style='margin-top:10px'><a href='/'>\xE2\x86\x90 Settings</a>"
-    "<a href='/history'>History</a><a href='/events'>Event log</a></div>"
+    "<a href='/history'>Data</a><a href='/events'>Event log</a></div>"
     "<div class=grid>"
     "<div class=card><div class=cardh>Sensors</div>"
       ROW("CO2", "co2") ROW("Temp / RH", "th") ROWD("SCD-41", "scd")
@@ -709,6 +753,7 @@ void handleDiag() {
 void handleWipe() {
   if (!authed()) return;
   datalog::clear();
+  datalog::event(gTelem.nowEpoch, "data wipe via web");   // events survive the wipe
   server.send(200, "text/plain", "ok");
 }
 
@@ -737,11 +782,19 @@ void handleDiagJson() {
   snprintf(b, sizeof(b), "%s / ASC %s", c.profile == PROFILE_VENTILATED ? "ventilated" : "sealed",
            c.profile == PROFILE_VENTILATED ? "on" : "off"); kv("profile", b);
   if (t.frcValid) { snprintf(b, sizeof(b), "%+d ppm", t.frcCorrPpm); kv("corr", b); } else kv("corr", "-");
-  if (!t.timeValid || c.lastFrcEpoch == 0) { kv("recal", "never"); kv("conf", "not set"); kv("confS", "warn"); }
+  // Last manual FRC is informational in both profiles.
+  if (!t.timeValid || c.lastFrcEpoch == 0) kv("recal", "never");
   else {
     uint32_t days = (t.nowEpoch > c.lastFrcEpoch)          // clock corrected backwards
                       ? (t.nowEpoch - c.lastFrcEpoch) / 86400UL : 0;
     snprintf(b, sizeof(b), "%lu days ago", (unsigned long)days); kv("recal", b);
+  }
+  // Confidence: with ASC on, the sensor self-calibrates — FRC age doesn't decay trust.
+  if (c.profile == PROFILE_VENTILATED)          { kv("conf", "auto (ASC)"); kv("confS", "ok"); }
+  else if (!t.timeValid || c.lastFrcEpoch == 0) { kv("conf", "not set"); kv("confS", "warn"); }
+  else {
+    uint32_t days = (t.nowEpoch > c.lastFrcEpoch)
+                      ? (t.nowEpoch - c.lastFrcEpoch) / 86400UL : 0;
     const char *cf, *cs;
     if (days >= c.calOverdueDays)    { cf = "overdue"; cs = "bad"; }
     else if (days >= c.calStaleDays) { cf = "stale"; cs = "warn"; }
@@ -806,6 +859,10 @@ void setupRoutes() {
     server.on("/favicon.ico", []() { server.send(404, "text/plain", ""); });
     server.onNotFound(handleNotFound);
     ElegantOTA.begin(&server);               // serves /update with a progress UI
+    ElegantOTA.onStart([]() { datalog::event(gTelem.nowEpoch, "ota update started"); });
+    ElegantOTA.onEnd([](bool ok) {
+      datalog::event(gTelem.nowEpoch, ok ? "ota update ok" : "ota update failed");
+    });
   }
   if (settings::cfg.webPassword[0])
     ElegantOTA.setAuth("admin", settings::cfg.webPassword);

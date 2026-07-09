@@ -1,4 +1,4 @@
-# stuffy — user manual
+# Stuffy — User Manual
 
 Everything you need to operate the monitor, in one place. Deeper background lives in
 [calibration.md](calibration.md) (why/where to recalibrate), [placement.md](placement.md)
@@ -29,8 +29,10 @@ either the reading is stale or calibration is overdue. Other cues:
 - **"no sensor"** (red): the sensor never produced a reading after boot — check the QT
   cabling.
 - **Trend arrow** (grey, neutral): CO₂ direction over the last ~2 minutes.
-- **Battery glyph** (top): grey = healthy, amber ≤ 35%, red ≤ 15%. Only shown when the
-  fuel gauge is fitted.
+- **Power glyph** (top): a **plug** while on USB power; a **battery** (grey = healthy,
+  amber ≤ 35%, red ≤ 15%) when actually draining. Inferred from the charge current, so
+  it can lag a minute or two after plugging/unplugging. Only shown when the fuel gauge
+  is fitted.
 - **Calibration dot** (bottom): appears when calibration is aging — cool colors escalate
   teal → blue → purple → violet as it goes aging → stale → overdue. When *overdue*, the
   main number also greys.
@@ -69,6 +71,10 @@ screen warns, and the confidence dot stays unknown until time is set.
 - **Ventilated (ASC on)** — the sensor self-calibrates by assuming the room regularly
   reaches outdoor-fresh levels. Only correct for spaces with real air exchange.
 
+In Ventilated mode the calibration-age dot and confidence tracking are suppressed —
+the sensor recalibrates itself (~weekly), so Diagnostics shows **auto (ASC)** instead
+of an aging countdown. In Sealed mode the age tracking is the trust signal.
+
 Switching profiles applies after a restart. After a switch, do a fresh-air walk so the
 new trust model starts from a known baseline.
 
@@ -85,9 +91,12 @@ view). Login is user **admin** + your web password. Pages:
   offset, rotation, AQ thresholds, calibration reference/altitude/reminders, profile,
   log interval, device name, WiFi, time zone, web password. The footer notes which
   changes need a restart (button provided).
-- **History** — CO₂ + temp graph; 24 h / 7 d / All ranges; **smooth** checkbox
-  (display-only averaging — the stored data and CSV are always raw); CSV download.
-- **Event log** — boots (with reset reason), calibration attempts, faults. Newest first.
+- **Data** — CO₂ + temp graph; 24 h / 7 d / All ranges; **smooth** checkbox
+  (display-only averaging — the stored data and CSV are always raw); a **Readings**
+  table (latest raw values, newest first) below the graph; CSV download.
+- **Event log** — boots (with reset reason), calibration attempts, sensor
+  stale/recovery, settings & profile changes, restarts (web/button), data wipes, OTA
+  updates, clock adjustments. Newest first.
 - **Diagnostics** — live sensor/calibration/network/system/logging cards, refreshing
   every 5 s. **Copy diagnostics** produces a paste-able text dump (great for remote
   troubleshooting). **Erase logged data** wipes the graph history (settings, calibration,
@@ -96,8 +105,12 @@ view). Login is user **admin** + your web password. Pages:
   reboots. Version confirms on the boot splash and Diagnostics.
 
 Time is set from NTP: automatically when home WiFi connects, or via **Save & sync
-time** (works from the setup AP too — it borrows your home WiFi for a moment). The
-coin-cell RTC keeps time through power-offs afterward.
+time**. Syncing needs internet: the device joins **the WiFi network saved in its
+settings** — *not* the phone viewing the setup-AP page. Somewhere with no WiFi (the
+office), turn on a **phone hotspot**, enter the hotspot's name/password as the WiFi
+network, then Save & sync. In practice this is rarely needed — the coin-cell RTC keeps
+time through power-offs and drifts only about a minute per year, so a sync at home
+before deployment lasts.
 
 ## Power & battery
 
@@ -112,14 +125,19 @@ Diagnostics page shows **Est. runtime** measured from the actual discharge rate.
 - **Altitude** — set your elevation (Settings → Calibration) so pressure compensation is
   right; applies after restart.
 - **Auto-brightness** — lux low/high map room light to the min/max brightness; gamma
-  shapes how gently it dims at the low end ([brightness.md](brightness.md)).
+  shapes how gently it dims at the low end ([brightness.md](brightness.md)). For a quick
+  "brighter/dimmer than I want right here" fix, use the **Brightness trim** slider —
+  it nudges the whole auto curve ±50% and applies on Save, no restart.
 
 ## Taking it to the office (checklist)
 
 1. Profile → **Sealed office (ASC off)** → Save → Restart.
 2. Do a **fresh-air walk** so it starts service freshly calibrated.
 3. Settings → Network → **untick WiFi** → Save (it restarts, radio off).
-4. Optional: note the last IP / hostname somewhere — reconfiguration at the office goes
+4. **Re-verify the temp offset in this configuration** (an hour settled, WiFi off):
+   the radio is a real heat source, so an offset tuned with WiFi on reads ~1–2 °F low
+   once it's off. Compare the on-screen temp to a reference and adjust via the setup AP.
+5. Optional: note the last IP / hostname somewhere — reconfiguration at the office goes
    through the button-hold setup AP.
 
 ## Troubleshooting
