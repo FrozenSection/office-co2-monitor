@@ -2,6 +2,8 @@
 #include "config.h"
 #include <LittleFS.h>
 #include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace {
   const char*  CUR = "/log.bin";
@@ -10,6 +12,8 @@ namespace {
   const size_t EVT_MAX = 6000;          // cap the event log; drop oldest wholesale
   const size_t REC = sizeof(datalog::Rec);
   bool         gReady = false;
+  SemaphoreHandle_t gEvMx = nullptr;   // event() is called from BOTH the loop and
+                                       // the async_tcp task; serialize appends
 
   uint32_t fileRecs(const char* path) {
     File f = LittleFS.open(path, "r");
@@ -25,6 +29,7 @@ bool datalog::begin() {
     Serial.println(F("datalog: LittleFS mount failed"));
     return false;
   }
+  gEvMx = xSemaphoreCreateMutex();
   gReady = true;
 
   // Heal a torn trailing record (power loss mid-write) so later appends stay
@@ -88,15 +93,22 @@ void datalog::append(uint32_t t, uint16_t co2, float tempC, float rh) {
   }
 }
 
-void datalog::clear() {
-  if (!gReady) return;
-  LittleFS.remove(CUR);
-  LittleFS.remove(OLD);
-  Serial.println(F("datalog: logged history erased"));
+bool datalog::clear() {
+  if (!gReady) return false;
+  bool ok = true;
+  if (LittleFS.exists(CUR) && !LittleFS.remove(CUR)) ok = false;   // fails if a
+  if (LittleFS.exists(OLD) && !LittleFS.remove(OLD)) ok = false;   // stream holds it open
+  Serial.println(ok ? F("datalog: logged history erased")
+                    : F("datalog: erase incomplete (file busy)"));
+  return ok;
 }
 
 void datalog::event(uint32_t t, const char* msg) {
   if (!gReady) return;
+  // Serialize: called from both the loop and the async_tcp task; two concurrent
+  // append handles to the same littlefs file lose the last-closed one's write.
+  if (gEvMx) xSemaphoreTake(gEvMx, portMAX_DELAY);
+
   // Keep it bounded: once it grows past the cap, start fresh (events are rare).
   File chk = LittleFS.open(EVT, "r");
   if (chk) { size_t sz = chk.size(); chk.close(); if (sz > EVT_MAX) LittleFS.remove(EVT); }
@@ -106,6 +118,7 @@ void datalog::event(uint32_t t, const char* msg) {
     f.printf("%lu,%s\n", (unsigned long)t, msg);
     f.close();
   }
+  if (gEvMx) xSemaphoreGive(gEvMx);
   Serial.printf("event: %s\n", msg);
 }
 
@@ -136,6 +149,22 @@ bool datalog::span(uint32_t& oldest, uint32_t& newest) {
     if (f) f.close();
   }
   return true;
+}
+
+bool datalog::next(Cursor& c, Rec& out) {
+  if (!gReady) return false;
+  const char* files[2] = { OLD, CUR };
+  while (c.idx < 2) {
+    if (!c.opened) {
+      c.f = LittleFS.open(files[c.idx], "r");
+      c.opened = true;
+    }
+    if (c.f && c.f.read((uint8_t*)&out, REC) == (int)REC) return true;
+    if (c.f) c.f.close();
+    c.idx++;
+    c.opened = false;
+  }
+  return false;
 }
 
 void datalog::readAll(std::function<void(const Rec&)> emit) {

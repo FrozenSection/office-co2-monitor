@@ -1,6 +1,8 @@
 #include "settings.h"
 #include "config.h"
 #include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace settings {
 Settings cfg;
@@ -9,6 +11,10 @@ Settings cfg;
 static Preferences prefs;
 static const char* NS = "co2cfg";
 static const uint16_t SCHEMA_VERSION = 8;
+// save() is called from the loop (FRC walk) AND the async_tcp task (web save);
+// the shared Preferences session isn't re-entrant — a collision silently drops
+// one save, or persists a blob missing the just-written lastFrcEpoch.
+static SemaphoreHandle_t gMx = nullptr;
 
 static void loadDefaults(Settings& c) {
   c.frcReferencePpm = FRC_REFERENCE_PPM;
@@ -51,6 +57,7 @@ static void loadDefaults(Settings& c) {
 }
 
 void settings::begin() {
+  gMx = xSemaphoreCreateMutex();     // created before the web server exists
   loadDefaults(cfg);
   prefs.begin(NS, false);
 
@@ -79,11 +86,17 @@ void settings::begin() {
   prefs.end();
 }
 
-void settings::save() {
+static void saveLocked() {
   prefs.begin(NS, false);
   prefs.putUShort("ver", SCHEMA_VERSION);
-  prefs.putBytes("blob", &cfg, sizeof(Settings));
+  prefs.putBytes("blob", &settings::cfg, sizeof(Settings));
   prefs.end();
+}
+
+void settings::save() {
+  if (gMx) xSemaphoreTake(gMx, portMAX_DELAY);
+  saveLocked();
+  if (gMx) xSemaphoreGive(gMx);
 }
 
 bool settings::ascEnabled() {
@@ -91,6 +104,8 @@ bool settings::ascEnabled() {
 }
 
 void settings::markRecalibrated(uint32_t epoch) {
-  cfg.lastFrcEpoch = epoch;
-  save();
+  if (gMx) xSemaphoreTake(gMx, portMAX_DELAY);
+  cfg.lastFrcEpoch = epoch;          // field write inside the lock, so a web
+  saveLocked();                      // save can't persist a blob without it
+  if (gMx) xSemaphoreGive(gMx);
 }

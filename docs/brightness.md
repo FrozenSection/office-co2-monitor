@@ -41,7 +41,7 @@ All live under **Settings → Display**.
 | **Auto min / max** | Perceptual floor / ceiling for the auto curve (0–100%). |
 | **Lux low / high** | Ambient-light endpoints. Low → min, high → max, mapped on a log axis. `low` must be ≥ 1. |
 | **Dimming gamma** | Curve shape, stored ×10 (`22` = 2.2). Higher = dimmer, gentler low end. |
-| **Brightness trim** | Live ±50% nudge on the whole auto curve — the "right policy, wrong notch" knob. Applies on Save. |
+| **Brightness trim** | Live ±50% nudge on the whole auto curve — the "right policy, wrong notch" knob. Applies on Save. Can dim below the night floor, but never below a faintly-visible minimum. |
 
 ## Effects to know
 

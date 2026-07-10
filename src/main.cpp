@@ -53,6 +53,8 @@ static bool     gFrcOk   = false;
 static uint32_t gLastReadMs = 0;        // millis() of last good SCD-41 read
 static bool     gStale      = false;    // no fresh reading for SENSOR_STALE_SEC
 static bool     gSensorFault = false;   // no first reading by SENSOR_FAULT_BOOT_SEC
+static uint8_t  gScdDiscard = 2;        // samples to skip after a measurement
+                                        // (re)start — they read hot/dry
 
 // Why an FRC was refused (so the result screen can explain).
 enum FrcFail { FRCF_NONE, FRCF_UNSTABLE, FRCF_IMPLAUSIBLE, FRCF_SENSOR };
@@ -729,6 +731,7 @@ static void commitFRC() {
     Serial.printf("FRC: WARNING unusually large correction (%+d ppm)\n", corrPpm);
 
   logScdError("start", scd4x.startPeriodicMeasurement());
+  gScdDiscard = 2;   // measurement restarted: first samples read hot/dry again
 
   if (gFrcOk) {
     char ev[48];
@@ -830,9 +833,12 @@ static void updateLuxAndBrightness() {
   // Perceptual target between the min/max endpoints; setBacklight() applies gamma.
   float target = settings::cfg.brightnessMin +
                  p * (settings::cfg.brightnessMax - settings::cfg.brightnessMin);
-  // user trim: quick "brighter/dimmer than I want right here" nudge on the curve
+  // user trim: quick "brighter/dimmer than I want right here" nudge on the curve.
+  // Floor at a still-visible level: through the gamma curve, anything below ~10
+  // renders as duty 1/4095 = visually BLACK, and negative trim in a dark room
+  // (curve already at the night floor) sailed right through to invisible.
   target += settings::cfg.brightnessBias * 2.55f;
-  if (target < 1) target = 1; else if (target > 255) target = 255;
+  if (target < 10) target = 10; else if (target > 255) target = 255;
 
   // Slew in PERCEPTUAL space so fades feel even from dim to bright.
   if (level < 0) level = target;
@@ -850,7 +856,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.printf("\noffice-co2-monitor  v%s\n", FIRMWARE_VERSION);
-  Serial.println(F("Phase 21.1: second-audit fixes (auth 404, sync restart, NaN, stale views)\n"));
+  Serial.println(F("Phase 24: async web server (parallel connections)\n"));
 
   settings::begin();
   setenv("TZ", settings::cfg.timezone, 1);   // local-time conversion for display
@@ -954,9 +960,12 @@ void loop() {
     ESP.restart();
   }
 
-  // Keep the web server (AP or home-WiFi STA) responsive, and adopt NTP time.
-  if (portal::apActive() || portal::staActive()) {
-    portal::handle();
+  // Pump portal work UNCONDITIONALLY: queued restarts/syncs must drain even if
+  // the AP was torn down right after the request — gated on active flags they
+  // survive armed and fire the next time WiFi opens (the "haunted setup" bug).
+  // DNS/OTA are gated internally; this is nearly free when WiFi is off.
+  portal::handle();
+  {
     uint32_t epoch;
     if (portal::consumeSynced(epoch)) {
       int32_t drift = (int32_t)(epoch - gNowEpoch);
@@ -981,10 +990,8 @@ void loop() {
       uint16_t co2 = 0; float t = 0, h = 0;
       if (scd4x.readMeasurement(co2, t, h) == 0 && co2 != 0) {
         // The SCD-41's first samples after a measurement (re)start read hot/dry
-        // (Sensirion: discard) — and the logger stamps the first reading after
-        // boot, so every reboot was logging one garbage row. Skip them.
-        static uint8_t discard = 2;
-        if (discard) { discard--; Serial.println(F("SCD-41: discarding warm-up sample")); }
+        // (Sensirion: discard). Re-armed by commitFRC's stop/start too.
+        if (gScdDiscard) { gScdDiscard--; Serial.println(F("SCD-41: discarding warm-up sample")); }
         else {
         gCo2 = co2; gTempC = t; gHum = h;
         gLastReadMs = now;

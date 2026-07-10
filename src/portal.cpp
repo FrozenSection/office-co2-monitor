@@ -5,15 +5,17 @@
 #include "version.h"
 
 #include <WiFi.h>
-#include <WebServer.h>
+#include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <ElegantOTA.h>
 #include <time.h>
+#include <memory>
+#include <atomic>
 
 namespace {
 
-WebServer     server(80);
+AsyncWebServer server(80);
 DNSServer     dns;
 bool          gApActive  = false;
 bool          gStaActive = false;
@@ -26,6 +28,18 @@ char          gStatus[40]  = "join AP";
 uint32_t      gSyncedEpoch  = 0;
 bool          gSyncedPending = false;
 portal::Telemetry gTelem = {};
+
+// Async handlers run on the network task and must NEVER block. Anything slow
+// (WiFi connect + NTP) or fatal (restart) is queued here and executed by
+// portal::handle() on the main loop; handlers respond immediately and a
+// status page polls for the outcome.
+std::atomic<uint32_t> gRestartAt{0};            // millis deadline; 0 = none
+enum SyncSt : uint8_t { SY_IDLE, SY_QUEUED, SY_RUNNING, SY_DONE };
+std::atomic<uint8_t> gSyncSt{SY_IDLE};          // atomics: written and read across
+                                                // the loop and async_tcp tasks
+bool   gSyncToggled = false;                    // captured at request time
+bool   gSyncRestart = false;                    // restart after showing the result
+String gSyncTitle, gSyncBody;                   // result for the status page
 
 String upStr() {
   uint32_t s = millis() / 1000;
@@ -121,9 +135,13 @@ const char* HISTORY_PAGE =
   "for(let j=Math.max(0,i-2);j<=Math.min(a.length-1,i+2);j++){s+=a[j];n++}"
   "r.push(Math.round(s/n*10)/10)}return r}"
   "function draw(){"
+  "tbl();"
   "const on=document.getElementById('sm').checked;"
   "try{localStorage.sm=on?'1':'0'}catch(e){}"
   "document.getElementById('n').textContent=raw.length+' points';"
+  // no internet (captive AP): the table above still works; say why the chart can't
+  "if(typeof Chart=='undefined'){"
+  "document.getElementById('n').textContent+=' \xC2\xB7 chart needs internet (CDN)';return;}"
   "const lab=raw.map(x=>new Date(x[0]*1000).toLocaleString([],"
   "{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));"
   "let co=raw.map(x=>x[1]),te=raw.map(x=>x[2]);"
@@ -138,8 +156,7 @@ const char* HISTORY_PAGE =
   "plugins:{legend:{labels:{boxWidth:12,font:{size:11}}}},"
   "scales:{x:{ticks:{maxTicksLimit:12,font:{size:10}}},"
   "y:{position:'left',grace:'8%',title:{display:true,text:'ppm'}},"
-  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});"
-  "tbl();}"
+  "y2:{position:'right',grace:'8%',grid:{drawOnChartArea:false}}}}});}"
   // table always shows RAW values (newest first), independent of the smooth toggle
   "function tbl(){const m=Math.min(raw.length,100);"
   "let s='<tr><th>time</th><th>CO2 ppm</th><th>temp</th><th>RH %</th></tr>';"
@@ -351,7 +368,7 @@ String pageHtml() {
   return h;
 }
 
-void sendResult(const char* title, const char* detail) {
+void sendResult(AsyncWebServerRequest* req, const char* title, const char* detail) {
   String h = "<!doctype html><meta charset=utf-8>"
              "<meta name=viewport content='width=device-width,initial-scale=1'>"
              "<title>stuffy</title>" UI_CSS
@@ -360,7 +377,7 @@ void sendResult(const char* title, const char* detail) {
   h += "</h1><div class=s style='font-size:14px'>"; h += detail;
   h += "</div><div style='margin-top:16px'><a href='/'>\xE2\x86\x90 Back to settings</a></div>"
        "</div></div>";
-  server.send(200, "text/html", h);
+  req->send(200, "text/html", h);
 }
 
 bool doNtp() {
@@ -379,14 +396,14 @@ bool doNtp() {
   return true;
 }
 
-void applyFormToSettings() {
+void applyFormToSettings(AsyncWebServerRequest* req) {
   Settings& c = settings::cfg;
   uint8_t prevProfile = c.profile;
-  strlcpy(c.wifiSsid, server.arg("ssid").c_str(), sizeof(c.wifiSsid));
-  String pass = server.arg("pass");
+  strlcpy(c.wifiSsid, req->arg("ssid").c_str(), sizeof(c.wifiSsid));
+  String pass = req->arg("pass");
   if (pass.length()) strlcpy(c.wifiPass, pass.c_str(), sizeof(c.wifiPass));
-  strlcpy(c.timezone, server.arg("tz").c_str(), sizeof(c.timezone));
-  String hn = server.arg("host");           // sanitize to mDNS-legal [a-z0-9-]
+  strlcpy(c.timezone, req->arg("tz").c_str(), sizeof(c.timezone));
+  String hn = req->arg("host");             // sanitize to mDNS-legal [a-z0-9-]
   if (hn.length()) {
     String clean;
     for (size_t i = 0; i < hn.length(); i++) {
@@ -396,31 +413,31 @@ void applyFormToSettings() {
     }
     if (clean.length()) strlcpy(c.hostname, clean.c_str(), sizeof(c.hostname));
   }
-  c.staEnabled = server.hasArg("sta");
-  c.logIntervalSec = constrain(server.arg("logiv").toInt(), 5, 86400);
-  String wpw = server.arg("webpw");
+  c.staEnabled = req->hasArg("sta");
+  c.logIntervalSec = constrain(req->arg("logiv").toInt(), 5, 86400);
+  String wpw = req->arg("webpw");
   if (wpw.length()) strlcpy(c.webPassword, wpw.c_str(), sizeof(c.webPassword));
 
-  c.brightness     = fromPct(server.arg("bri").toInt());
-  c.autoBrightness = server.hasArg("autob");
-  c.brightnessMin  = fromPct(server.arg("brmin").toInt());
-  c.brightnessMax  = fromPct(server.arg("brmax").toInt());
-  c.luxLow         = constrain(server.arg("luxlo").toInt(), 0, 65000);
-  c.luxHigh        = constrain(server.arg("luxhi").toInt(), 1, 65000);
-  c.tempUnitF      = server.arg("unit").toInt() != 0;
-  c.rotation       = constrain(server.arg("rot").toInt(), 0, 3);
-  c.aqGood         = constrain(server.arg("aqg").toInt(), 400, 5000);
-  c.aqFair         = constrain(server.arg("aqf").toInt(), 400, 5000);
-  c.aqPoor         = constrain(server.arg("aqp").toInt(), 400, 5000);
-  c.frcReferencePpm= constrain(server.arg("frc").toInt(), 300, 2000);
-  c.profile        = server.arg("profile").toInt() ? 1 : 0;
-  c.calAgingDays   = constrain(server.arg("cala").toInt(), 1, 3650);
-  c.calStaleDays   = constrain(server.arg("cals").toInt(), 1, 3650);
-  c.calOverdueDays = constrain(server.arg("calo").toInt(), 1, 3650);
-  c.altitudeM      = constrain(server.arg("alt").toInt(), 0, 9000);
-  c.tempOffsetC10  = constrain(server.arg("toff").toInt(), 0, 200);
-  c.gammaX10       = constrain(server.arg("gam").toInt(), 10, 30);
-  c.brightnessBias = constrain(server.arg("bias").toInt(), -50, 50);
+  c.brightness     = fromPct(req->arg("bri").toInt());
+  c.autoBrightness = req->hasArg("autob");
+  c.brightnessMin  = fromPct(req->arg("brmin").toInt());
+  c.brightnessMax  = fromPct(req->arg("brmax").toInt());
+  c.luxLow         = constrain(req->arg("luxlo").toInt(), 0, 65000);
+  c.luxHigh        = constrain(req->arg("luxhi").toInt(), 1, 65000);
+  c.tempUnitF      = req->arg("unit").toInt() != 0;
+  c.rotation       = constrain(req->arg("rot").toInt(), 0, 3);
+  c.aqGood         = constrain(req->arg("aqg").toInt(), 400, 5000);
+  c.aqFair         = constrain(req->arg("aqf").toInt(), 400, 5000);
+  c.aqPoor         = constrain(req->arg("aqp").toInt(), 400, 5000);
+  c.frcReferencePpm= constrain(req->arg("frc").toInt(), 300, 2000);
+  c.profile        = req->arg("profile").toInt() ? 1 : 0;
+  c.calAgingDays   = constrain(req->arg("cala").toInt(), 1, 3650);
+  c.calStaleDays   = constrain(req->arg("cals").toInt(), 1, 3650);
+  c.calOverdueDays = constrain(req->arg("calo").toInt(), 1, 3650);
+  c.altitudeM      = constrain(req->arg("alt").toInt(), 0, 9000);
+  c.tempOffsetC10  = constrain(req->arg("toff").toInt(), 0, 200);
+  c.gammaX10       = constrain(req->arg("gam").toInt(), 10, 30);
+  c.brightnessBias = constrain(req->arg("bias").toInt(), -50, 50);
 
   // enforce ordering / sane relationships so labels can't contradict
   if (c.aqFair <= c.aqGood)               c.aqFair = c.aqGood + 1;
@@ -449,33 +466,34 @@ void applyFormToSettings() {
 }
 
 // HTTP Basic auth gate. Open when no web password is set.
-bool authed() {
+bool authed(AsyncWebServerRequest* req) {
   if (settings::cfg.webPassword[0] == '\0') return true;
-  if (!server.authenticate("admin", settings::cfg.webPassword)) {
-    server.requestAuthentication();
+  if (!req->authenticate("admin", settings::cfg.webPassword)) {
+    req->requestAuthentication();
     return false;
   }
   return true;
 }
 
 // Reject a password change unless both entries match (typo / lockout guard).
-bool passwordMismatch() {
-  String wpw = server.arg("webpw");
-  if (wpw.length() && wpw != server.arg("webpw2")) {
-    sendResult("Passwords don't match",
+bool passwordMismatch(AsyncWebServerRequest* req) {
+  String wpw = req->arg("webpw");
+  if (wpw.length() && wpw != req->arg("webpw2")) {
+    sendResult(req, "Passwords don't match",
                "Nothing was saved. Go back and enter the new password the same way in both fields.");
     return true;
   }
   return false;
 }
 
-void handleRoot() {
-  if (!authed()) return;
-  server.send(200, "text/html", pageHtml());
+void handleRoot(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  req->send(200, "text/html", pageHtml());
 }
 
-// Send a brief page, then restart so a WiFi change takes effect cleanly.
-void restartWith(const char* title, const char* note) {
+// Send a brief page; the actual restart is queued for the main loop (an async
+// handler must not block or reboot mid-response).
+void restartWith(AsyncWebServerRequest* req, const char* title, const char* note) {
   String h = "<!doctype html><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<meta http-equiv=refresh content='9;url=/'>" UI_CSS
@@ -484,113 +502,161 @@ void restartWith(const char* title, const char* note) {
   h += "</h1><div class=s>";
   h += note;
   h += "</div></div></div>";
-  server.send(200, "text/html", h);
+  req->send(200, "text/html", h);
   datalog::event(gTelem.nowEpoch, "restart: wifi change");
-  delay(500);
-  ESP.restart();
+  gRestartAt = millis() + 1500;   // give the response time to flush
 }
 
-void handleSaveSettings() {
-  if (!authed()) return;
-  if (passwordMismatch()) return;
+void handleSaveSettings(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  // The sync worker may be mid-connect using cfg.wifiSsid/Pass and its own
+  // restart plan; don't mutate state underneath it.
+  if (gSyncSt == SY_QUEUED || gSyncSt == SY_RUNNING) {
+    sendResult(req, "Busy", "A time sync is in progress. Try again in a few seconds.");
+    return;
+  }
+  if (passwordMismatch(req)) return;
   bool wasSta = settings::cfg.staEnabled;
-  applyFormToSettings();
+  applyFormToSettings(req);
   if (settings::cfg.staEnabled != wasSta) {       // WiFi toggled -> restart to (dis)connect
-    restartWith("Applying WiFi change\xE2\x80\xA6",
+    restartWith(req, "Applying WiFi change\xE2\x80\xA6",
                 "Restarting. If you turned WiFi off, reconnect via the device's setup AP "
                 "(hold the button).");
     return;
   }
-  sendResult("Saved", "Settings stored. Display and air-quality changes are live; "
-                      "profile, altitude, and temp offset apply after a restart.");
+  sendResult(req, "Saved", "Settings stored. Display and air-quality changes are live; "
+                           "profile, altitude, and temp offset apply after a restart.");
 }
 
-void handleSync() {
-  if (!authed()) return;
-  if (passwordMismatch()) return;
+// "Syncing" interstitial: polls /sync-status until the loop-side worker is done.
+void sendSyncing(AsyncWebServerRequest* req) {
+  req->send(200, "text/html",
+    String("<!doctype html><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<meta http-equiv=refresh content='2;url=/sync-status'>" UI_CSS
+    "<div class=wrap><div class=card><h1 style='margin-top:0'>Syncing\xE2\x80\xA6</h1>"
+    "<div class=s>Connecting and fetching NTP time. This page updates by itself.</div>"
+    "</div></div>"));
+}
+
+// POST /sync: validate + persist, then QUEUE the slow work (WiFi connect + NTP
+// can block 20s — forbidden on the async network task). The loop runs it.
+void handleSync(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  if (passwordMismatch(req)) return;
+  if (gSyncSt == SY_QUEUED || gSyncSt == SY_RUNNING) { sendSyncing(req); return; }
   bool wasSta = settings::cfg.staEnabled;
-  applyFormToSettings();
-  bool toggled = settings::cfg.staEnabled != wasSta;
+  applyFormToSettings(req);
+  gSyncToggled = (settings::cfg.staEnabled != wasSta);
+  gSyncSt = SY_QUEUED;
+  sendSyncing(req);
+}
+
+void handleSyncStatus(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  if (gSyncSt == SY_QUEUED || gSyncSt == SY_RUNNING) { sendSyncing(req); return; }
+  if (gSyncSt == SY_DONE) {
+    sendResult(req, gSyncTitle.c_str(), gSyncBody.c_str());
+    if (!gSyncRestart) gSyncSt = SY_IDLE;   // restart path keeps the result up until reboot
+    return;
+  }
+  req->redirect("/");
+}
+
+// The slow half of /sync, run from portal::handle() on the main loop. While it
+// blocks, the async server stays responsive (it lives on its own task) — the
+// status page keeps answering mid-connect.
+void syncWorker() {
+  if (gSyncSt != SY_QUEUED) return;
+  gSyncSt = SY_RUNNING;
+  gSyncRestart = false;
 
   // Already on home WiFi -> NTP, then honor a WiFi-toggle change like Save does.
   if (gStaActive && WiFi.status() == WL_CONNECTED) {
     bool ok = doNtp();
-    if (toggled) {
-      restartWith(ok ? "Time synced \xE2\x80\x94 applying WiFi change\xE2\x80\xA6"
-                     : "Applying WiFi change\xE2\x80\xA6",
-                  "Restarting. If you turned WiFi off, reconnect via the device's setup AP "
-                  "(hold the button).");
-      return;
+    if (gSyncToggled) {
+      gSyncTitle = ok ? "Time synced \xE2\x80\x94 applying WiFi change\xE2\x80\xA6"
+                      : "Applying WiFi change\xE2\x80\xA6";
+      gSyncBody  = "Restarting. If you turned WiFi off, reconnect via the device's setup AP "
+                   "(hold the button).";
+      gSyncRestart = true;
+    } else if (ok) { gSyncTitle = "Time synced"; gSyncBody = "Clock set from NTP."; }
+    else           { gSyncTitle = "No time"; gSyncBody = "NTP didn't answer. Try again shortly."; }
+  } else {
+    // AP path: connect (keep AP up if one is actually running) then NTP.
+    gPhase = portal::P_CONNECTING;
+    strlcpy(gStatus, "connecting...", sizeof(gStatus));
+    // AP_STA only when the softAP is configured — else a dropped STA link here
+    // would beacon an unconfigured open AP
+    WiFi.mode(gApActive ? WIFI_AP_STA : WIFI_STA);
+    WiFi.begin(settings::cfg.wifiSsid, settings::cfg.wifiPass);
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(200);
+    if (WiFi.status() != WL_CONNECTED) {
+      // stay in the AP so the user can fix credentials and retry (no restart even
+      // if the toggle changed — a reboot here would strand the device offline)
+      gPhase = portal::P_FAILED;
+      strlcpy(gStatus, "wifi failed", sizeof(gStatus));
+      gSyncTitle = "Couldn't connect";
+      gSyncBody  = "Check the network name and password, then try again.";
+    } else {
+      bool ntpOk = doNtp();
+      gPhase = ntpOk ? portal::P_SYNCED : portal::P_FAILED;
+      if (!ntpOk) strlcpy(gStatus, "ntp failed", sizeof(gStatus));
+      if (settings::cfg.staEnabled) {
+        // This ad-hoc STA link never set gStaActive, so exiting the AP would tear
+        // it down (the "verified WiFi, then went dark" trap). Restart: the device
+        // boots straight onto home WiFi properly (mDNS, LAN page, NTP retry).
+        gSyncTitle = ntpOk ? "Time synced \xE2\x80\x94 joining home WiFi\xE2\x80\xA6"
+                           : "Joining home WiFi\xE2\x80\xA6";
+        gSyncBody  = "WiFi verified. Restarting to connect properly \xE2\x80\x94 find the "
+                     "device at its usual address in a few seconds.";
+        gSyncRestart = true;
+      } else if (ntpOk) {
+        gSyncTitle = "Time synced";
+        gSyncBody  = "Settings saved and the clock is set from NTP.";
+      } else {
+        gSyncTitle = "Connected, but no time";
+        gSyncBody  = "NTP didn't answer. Try again in a moment.";
+      }
     }
-    if (ok) sendResult("Time synced", "Clock set from NTP.");
-    else    sendResult("No time", "NTP didn't answer. Try again shortly.");
-    return;
   }
-
-  // AP path: connect (keep AP up) then NTP.
-  gPhase = portal::P_CONNECTING;
-  strlcpy(gStatus, "connecting...", sizeof(gStatus));
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(settings::cfg.wifiSsid, settings::cfg.wifiPass);
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(200);
-  if (WiFi.status() != WL_CONNECTED) {
-    // stay in the AP so the user can fix credentials and retry (no restart even
-    // if the toggle changed — a reboot here would strand the device offline)
-    gPhase = portal::P_FAILED;
-    strlcpy(gStatus, "wifi failed", sizeof(gStatus));
-    sendResult("Couldn't connect", "Check the network name and password, then try again.");
-    return;
+  if (gSyncRestart) {
+    datalog::event(gTelem.nowEpoch, "restart: wifi change");
+    gRestartAt = millis() + 6000;   // long enough for the status poll to show the result
   }
-  bool ntpOk = doNtp();
-  gPhase = ntpOk ? portal::P_SYNCED : portal::P_FAILED;
-  if (!ntpOk) strlcpy(gStatus, "ntp failed", sizeof(gStatus));
-
-  if (settings::cfg.staEnabled) {
-    // This ad-hoc STA link never set gStaActive, so exiting the AP would tear it
-    // down (the "verified WiFi, then went dark" trap). Restart: the device boots
-    // straight onto home WiFi properly (mDNS, LAN page, NTP retry if needed).
-    restartWith(ntpOk ? "Time synced \xE2\x80\x94 joining home WiFi\xE2\x80\xA6"
-                      : "Joining home WiFi\xE2\x80\xA6",
-                "WiFi verified. Restarting to connect properly \xE2\x80\x94 find the device "
-                "at its usual address in a few seconds.");
-    return;
-  }
-  // One-shot sync (WiFi stays off): the link is dropped when the AP closes.
-  if (ntpOk) sendResult("Time synced", "Settings saved and the clock is set from NTP.");
-  else       sendResult("Connected, but no time", "NTP didn't answer. Try again in a moment.");
+  gSyncSt = SY_DONE;
 }
 
-void handleRestart() {
-  if (!authed()) return;
+void handleRestart(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  if (gSyncSt == SY_QUEUED || gSyncSt == SY_RUNNING) {
+    sendResult(req, "Busy", "A time sync is in progress. Try again in a few seconds.");
+    return;
+  }
   datalog::event(gTelem.nowEpoch, "restart via web");
-  server.send(200, "text/html",
-              "<!doctype html><meta charset=utf-8>"
-              "<meta http-equiv=refresh content='7;url=/'>"
-              "<body style='font-family:system-ui;margin:24px'>"
-              "<h1>Restarting\xE2\x80\xA6</h1><p>This page returns in a few seconds.</p>");
-  delay(400);
-  ESP.restart();
+  req->send(200, "text/html",
+            "<!doctype html><meta charset=utf-8>"
+            "<meta http-equiv=refresh content='7;url=/'>"
+            "<body style='font-family:system-ui;margin:24px'>"
+            "<h1>Restarting\xE2\x80\xA6</h1><p>This page returns in a few seconds.</p>");
+  gRestartAt = millis() + 1200;
 }
 
-void handleNotFound() {
-  if (gApActive) {   // captive redirect to the portal page
-    server.sendHeader("Location", String("http://") + gApIp + "/", true);
-    server.send(302, "text/plain", "");
-  } else {           // STA: bounce to "/" so auth is enforced there (never serve
-    server.sendHeader("Location", "/", true);   // the settings page ungated)
-    server.send(302, "text/plain", "");
-  }
+void handleNotFound(AsyncWebServerRequest* req) {
+  if (gApActive) req->redirect(String("http://") + gApIp + "/");  // captive portal
+  else           req->redirect("/");   // STA: auth is enforced at "/" — never
+}                                      // serve the settings page ungated
+
+void handleHistory(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  // byte-pointer overload = zero-copy response straight from flash (~8 KB page)
+  req->send(200, "text/html", (const uint8_t*)HISTORY_PAGE, strlen(HISTORY_PAGE));
 }
 
-void handleHistory() {
-  if (!authed()) return;
-  server.send(200, "text/html", HISTORY_PAGE);
-}
-
-void handleDataJson() {
-  if (!authed()) return;
-  long hours = server.arg("h").toInt();        // 0 / absent = all history
+void handleDataJson(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  long hours = req->arg("h").toInt();          // 0 / absent = all history
   if (hours < 0) hours = 0;
   if (hours > 24L * 3650) hours = 24L * 3650;  // clamp: h*3600 must not wrap uint32
   uint32_t cutoff = 0;
@@ -604,66 +670,84 @@ void handleDataJson() {
   if (stride == 0) stride = 1;
   bool unitF = settings::cfg.tempUnitF;
 
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
-  server.sendContent("[");
-  String buf; buf.reserve(2048);
+  // Downsampled to < 2x LOG_GRAPH_MAX_POINTS points (~34 KB worst case):
+  // small enough to build whole rather than stream.
+  String j; j.reserve(min((uint32_t)34000, (total / stride) * 28 + 64));
+  j += '[';
   uint32_t i = 0; bool first = true;
   datalog::readAll([&](const datalog::Rec& r) {
     if (r.t < cutoff) return;
     if ((i++ % stride) != 0) return;
     float temp = unitF ? (r.tempC10 / 10.0f * 9.0f / 5.0f + 32.0f) : r.tempC10 / 10.0f;
-    if (!first) buf += ',';
+    if (!first) j += ',';
     first = false;
-    buf += '['; buf += r.t; buf += ','; buf += r.co2; buf += ',';
-    buf += String(temp, 1); buf += ','; buf += r.rh; buf += ']';
-    if (buf.length() > 1800) { server.sendContent(buf); buf = ""; }
+    j += '['; j += r.t; j += ','; j += r.co2; j += ',';
+    j += String(temp, 1); j += ','; j += r.rh; j += ']';
   });
-  if (buf.length()) server.sendContent(buf);
-  server.sendContent("]");
-  server.sendContent("");
+  j += ']';
+  req->send(200, "application/json", j);
 }
 
-void handleDataCsv() {
-  if (!authed()) return;
-  bool unitF = settings::cfg.tempUnitF;
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.sendHeader("Content-Disposition", "attachment; filename=stuffy-history.csv");
-  server.send(200, "text/csv", "");
-  server.sendContent(unitF ? "unix_time,co2_ppm,temp_F,rh\n" : "unix_time,co2_ppm,temp_C,rh\n");
-  String buf; buf.reserve(2048);
-  datalog::readAll([&](const datalog::Rec& r) {
-    float temp = unitF ? (r.tempC10 / 10.0f * 9.0f / 5.0f + 32.0f) : r.tempC10 / 10.0f;
-    buf += r.t; buf += ','; buf += r.co2; buf += ',';
-    buf += String(temp, 1); buf += ','; buf += r.rh; buf += '\n';
-    if (buf.length() > 1800) { server.sendContent(buf); buf = ""; }
-  });
-  if (buf.length()) server.sendContent(buf);
-  server.sendContent("");
+// Full history can be ~0.5 MB — far too big for RAM, so stream it with a
+// chunked response. The cursor state lives in a shared_ptr captured by the
+// callback, which the server invokes repeatedly until it returns 0.
+void handleDataCsv(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  struct CsvCtx {
+    datalog::Cursor cur;
+    bool header = false, done = false;
+    bool unitF;
+  };
+  auto ctx = std::make_shared<CsvCtx>();
+  ctx->unitF = settings::cfg.tempUnitF;
+
+  AsyncWebServerResponse* res = req->beginChunkedResponse("text/csv",
+    [ctx](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+      size_t n = 0;
+      if (!ctx->header) {
+        const char* h = ctx->unitF ? "unix_time,co2_ppm,temp_F,rh\n"
+                                   : "unix_time,co2_ppm,temp_C,rh\n";
+        size_t hl = strlen(h);
+        if (hl > maxLen) return 0;             // can't even fit the header: abort
+        memcpy(buf, h, hl); n = hl;
+        ctx->header = true;
+      }
+      char line[48];
+      while (!ctx->done && n + sizeof(line) <= maxLen) {
+        datalog::Rec r;
+        if (!datalog::next(ctx->cur, r)) { ctx->done = true; break; }
+        float temp = ctx->unitF ? (r.tempC10 / 10.0f * 9.0f / 5.0f + 32.0f)
+                                : r.tempC10 / 10.0f;
+        int len = snprintf(line, sizeof(line), "%lu,%u,%.1f,%u\n",
+                           (unsigned long)r.t, r.co2, temp, r.rh);
+        if (len > 0) { memcpy(buf + n, line, len); n += len; }
+      }
+      return n;                                // 0 after done = end of response
+    });
+  res->addHeader("Content-Disposition", "attachment; filename=stuffy-history.csv");
+  req->send(res);
 }
 
-void handleEvents() {
-  if (!authed()) return;
+void handleEvents(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
   String raw = datalog::events();
 
-  // Stream in chunks (like /data.csv) — the full log rendered as HTML rows is
-  // far bigger than the raw text, and one giant String risks failing on a
-  // fragmented heap with WiFi active.
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
-  server.sendContent(
-    "<!doctype html><meta charset=utf-8>"
+  // Newest-first with local timestamps; tint failures/refusals. Bounded: only
+  // the newest EVT_PAGE_MAX lines are rendered (the raw file is capped anyway),
+  // so the whole page stays a modest single String.
+  const int EVT_PAGE_MAX = 100;
+  String h;
+  h.reserve(4096 + raw.length() * 3);
+  h += "<!doctype html><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>stuffy events</title>" UI_CSS
     "<div class=wrap><h1>Event log</h1>"
     "<div class=nav><a href='/'>\xE2\x86\x90 Settings</a><a href='/diag'>Diagnostics</a>"
-    "<a href='/history'>Data</a></div><div class=card>");
+    "<a href='/history'>Data</a></div><div class=card>";
 
-  // Newest-first with local timestamps; tint failures/refusals.
-  String buf; buf.reserve(2048);
-  bool any = false;
+  int shown = 0;
   int end = raw.length();
-  while (end > 0) {
+  while (end > 0 && shown < EVT_PAGE_MAX) {
     int nl = raw.lastIndexOf('\n', end - 1);
     String line = raw.substring(nl + 1, end);
     end = nl;
@@ -671,32 +755,32 @@ void handleEvents() {
     if (line.length()) {
       int comma = line.indexOf(',');
       if (comma > 0) {
-        any = true;
+        shown++;
         uint32_t ep = (uint32_t)line.substring(0, comma).toInt();
         String msg = line.substring(comma + 1);
         char ts[24];
         if (ep > 0) { time_t tt = ep; struct tm lt; localtime_r(&tt, &lt); strftime(ts, sizeof(ts), "%b %d  %H:%M", &lt); }
         else strcpy(ts, "(no clock)");
         const char* col = (msg.indexOf("fail") >= 0 || msg.indexOf("refused") >= 0) ? "#b06a1a" : "#333";
-        buf += "<div class=stat><span class=k style='flex:none;min-width:100px'>";
-        buf += ts;
-        buf += "</span><span class=v style='flex:1;text-align:left;color:";
-        buf += col; buf += "'>"; buf += htmlAttrEsc(msg); buf += "</span></div>";
-        if (buf.length() > 1800) { server.sendContent(buf); buf = ""; }
+        h += "<div class=stat><span class=k style='flex:none;min-width:100px'>";
+        h += ts;
+        h += "</span><span class=v style='flex:1;text-align:left;color:";
+        h += col; h += "'>"; h += htmlAttrEsc(msg); h += "</span></div>";
       }
     }
   }
-  if (!any) buf += "<div class=s>No events logged yet.</div>";
-  buf += "</div></div>";
-  server.sendContent(buf);
-  server.sendContent("");
+  if (!shown) h += "<div class=s>No events logged yet.</div>";
+  h += "</div>";
+  if (end > 0) h += "<div class=s>Showing the latest " + String(shown) + " events.</div>";
+  h += "</div>";
+  req->send(200, "text/html", h);
 }
 
 #define ROW(label,id)  "<div class=stat><span class=k>" label "</span><span class=v id=" id "></span></div>"
 #define ROWD(label,id) "<div class=stat><span class=k>" label "</span><span class=v><i class=d id=" id "D></i><span id=" id "></span></span></div>"
 
-void handleDiag() {
-  if (!authed()) return;
+void handleDiag(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
   String h = "<!doctype html><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>stuffy diagnostics</title>" UI_CSS
@@ -747,18 +831,20 @@ void handleDiag() {
     "function wipe(){if(!confirm('Erase all logged history? This cannot be undone.'))return;"
     "fetch('/wipe',{method:'POST'}).then(()=>load());}"
     "</script>";
-  server.send(200, "text/html", h);
+  req->send(200, "text/html", h);
 }
 
-void handleWipe() {
-  if (!authed()) return;
-  datalog::clear();
-  datalog::event(gTelem.nowEpoch, "data wipe via web");   // events survive the wipe
-  server.send(200, "text/plain", "ok");
+void handleWipe(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
+  // clear() can fail if a CSV download holds a log file open — report honestly
+  bool ok = datalog::clear();
+  datalog::event(gTelem.nowEpoch, ok ? "data wipe via web"
+                                     : "data wipe incomplete (file busy)");
+  req->send(ok ? 200 : 409, "text/plain", ok ? "ok" : "busy - retry shortly");
 }
 
-void handleDiagJson() {
-  if (!authed()) return;
+void handleDiagJson(AsyncWebServerRequest* req) {
+  if (!authed(req)) return;
   Settings& c = settings::cfg;
   portal::Telemetry& t = gTelem;
   char b[64];
@@ -833,30 +919,28 @@ void handleDiagJson() {
 
   if (j.endsWith(",")) j.remove(j.length() - 1);
   j += "}";
-  server.send(200, "application/json", j);
+  req->send(200, "application/json", j);
 }
 
 void setupRoutes() {
-  // Register handlers exactly once: server.stop() doesn't free the handler
-  // chain, so re-registering on every AP open/close cycle leaks heap.
+  // Register handlers exactly once; begin()/end() can cycle freely.
   static bool routed = false;
   if (!routed) {
     routed = true;
-    server.on("/", handleRoot);
+    server.on("/", HTTP_GET, handleRoot);
     server.on("/save", HTTP_POST, handleSaveSettings);
     server.on("/sync", HTTP_POST, handleSync);
+    server.on("/sync-status", HTTP_GET, handleSyncStatus);
     server.on("/restart", HTTP_POST, handleRestart);
-    server.on("/history", handleHistory);
-    server.on("/data.json", handleDataJson);
-    server.on("/data.csv", handleDataCsv);
-    server.on("/events", handleEvents);
-    server.on("/diag", handleDiag);
-    server.on("/diag.json", handleDiagJson);
+    server.on("/history", HTTP_GET, handleHistory);
+    server.on("/data.json", HTTP_GET, handleDataJson);
+    server.on("/data.csv", HTTP_GET, handleDataCsv);
+    server.on("/events", HTTP_GET, handleEvents);
+    server.on("/diag", HTTP_GET, handleDiag);
+    server.on("/diag.json", HTTP_GET, handleDiagJson);
     server.on("/wipe", HTTP_POST, handleWipe);
-    // fast 404 for the favicon: without this every page view triggers a
-    // redirect to "/" and a second full settings-page build on this
-    // single-threaded server (doubling the per-click work)
-    server.on("/favicon.ico", []() { server.send(404, "text/plain", ""); });
+    server.on("/favicon.ico", HTTP_GET,
+              [](AsyncWebServerRequest* r) { r->send(404, "text/plain", ""); });
     server.onNotFound(handleNotFound);
     ElegantOTA.begin(&server);               // serves /update with a progress UI
     ElegantOTA.onStart([]() { datalog::event(gTelem.nowEpoch, "ota update started"); });
@@ -910,8 +994,13 @@ bool portal::startSTA() {
 }
 
 void portal::handle() {
+  // Requests are served on the async network task; this pump only runs the
+  // captive DNS, OTA housekeeping, and work queued by handlers (slow sync,
+  // pending restarts) that must not run on that task.
   if (gApActive) dns.processNextRequest();
-  if (gApActive || gStaActive) { server.handleClient(); ElegantOTA.loop(); }
+  if (gApActive || gStaActive) ElegantOTA.loop();
+  syncWorker();
+  if (gRestartAt && (int32_t)(millis() - gRestartAt) >= 0) ESP.restart();
 }
 
 void portal::stopAP() {
@@ -922,7 +1011,7 @@ void portal::stopAP() {
   if (gStaActive) {
     WiFi.mode(WIFI_STA);                    // keep the home-WiFi link + LAN server up
   } else {
-    server.stop();
+    server.end();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
   }

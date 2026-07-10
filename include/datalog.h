@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <FS.h>
 #include <functional>
 
 // Lightweight time-series log on internal flash (LittleFS). Fixed-size binary
@@ -18,7 +19,12 @@ namespace datalog {
   void     append(uint32_t t, uint16_t co2, float tempC, float rh);
   uint32_t count();                                   // total records held
   bool     span(uint32_t& oldest, uint32_t& newest);  // first/last timestamps; false if empty
-  void     clear();                                   // erase the logged history (not events)
+  bool     clear();                                   // erase history (not events); false if a file was busy
+
+  // Resumable oldest->newest cursor, for streaming responses that produce the
+  // output in chunks (async web callbacks) rather than one readAll() pass.
+  struct Cursor { File f; int idx = 0; bool opened = false; };
+  bool     next(Cursor& c, Rec& out);                 // false at end of history
   void     readAll(std::function<void(const Rec&)> emit);  // oldest -> newest
 
   // Human-readable event log (boots, calibrations, sensor faults). Small, capped

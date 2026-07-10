@@ -22,7 +22,7 @@ history, and updates.
 - **On-demand web config** — a captive AP for first setup, plus an optional always-on
   page at `http://<name>.local` when connected to home WiFi.
 - **Data logging** to internal flash with a trend graph + CSV export.
-- **OTA firmware updates** (ElegantOTA), protected by HTTP Basic auth.
+- **OTA firmware updates** (ElegantOTA), protected by HTTP auth once a web password is set.
 
 ## What it measures — and what it doesn't
 
