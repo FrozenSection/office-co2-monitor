@@ -469,8 +469,8 @@ void applyFormToSettings(AsyncWebServerRequest* req) {
 bool authed(AsyncWebServerRequest* req) {
   if (settings::cfg.webPassword[0] == '\0') return true;
   if (!req->authenticate("admin", settings::cfg.webPassword)) {
-    req->requestAuthentication();
-    return false;
+    req->requestAuthentication(nullptr, false);   // BASIC (async default is digest,
+    return false;                                 // which captive mini-browsers choke on)
   }
   return true;
 }
@@ -941,6 +941,26 @@ void setupRoutes() {
     server.on("/wipe", HTTP_POST, handleWipe);
     server.on("/favicon.ico", HTTP_GET,
               [](AsyncWebServerRequest* r) { r->send(404, "text/plain", ""); });
+    // OS connectivity probes: answer "success" so phones/laptops joining the
+    // setup AP never raise the captive-portal mini-browser — it can't drive our
+    // auth prompt (blank frozen sheet) — and don't flag the network as dead.
+    // Users browse to the portal in a real browser (URL is on the device screen).
+    server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest* r) {   // iOS/macOS
+      r->send(200, "text/html",
+              "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    });
+    server.on("/library/test/success.html", HTTP_GET, [](AsyncWebServerRequest* r) {
+      r->send(200, "text/html",
+              "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    });
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest* r) { r->send(204); });  // Android
+    server.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest* r) { r->send(204); });
+    server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest* r) {                 // Windows
+      r->send(200, "text/plain", "Microsoft Connect Test");
+    });
+    server.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest* r) {
+      r->send(200, "text/plain", "Microsoft NCSI");
+    });
     server.onNotFound(handleNotFound);
     ElegantOTA.begin(&server);               // serves /update with a progress UI
     ElegantOTA.onStart([]() { datalog::event(gTelem.nowEpoch, "ota update started"); });
@@ -965,6 +985,7 @@ void portal::startAP() {
   IPAddress ip = WiFi.softAPIP();
   snprintf(gApIp, sizeof(gApIp), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
   dns.start(53, "*", ip);
+  if (MDNS.begin(settings::cfg.hostname)) MDNS.addService("http", "tcp", 80);
   setupRoutes();
   gApActive = true;
   gPhase    = P_AP;
@@ -1011,6 +1032,7 @@ void portal::stopAP() {
   if (gStaActive) {
     WiFi.mode(WIFI_STA);                    // keep the home-WiFi link + LAN server up
   } else {
+    MDNS.end();
     server.end();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);

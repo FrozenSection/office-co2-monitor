@@ -650,7 +650,9 @@ static void drawWifiAP() {
   char wifi[80];
   snprintf(wifi, sizeof(wifi), "WIFI:T:nopass;S:%s;;", portal::apSsid());
   drawQR(wifi);                              // scan with phone camera to join
-  drawTextC(&FreeSans9pt7b, 120, 214, cFaint(), "tap to exit");
+  // no captive popup appears (by design) — tell the user where to browse
+  drawTextC(&FreeSans9pt7b, 120, 198, cSec(),   "browse: 192.168.4.1");
+  drawTextC(&FreeSans9pt7b, 120, 216, cFaint(), "tap to exit");
 }
 
 static void drawWifiSTA() {

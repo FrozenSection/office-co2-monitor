@@ -82,7 +82,10 @@ new trust model starts from a known baseline.
 
 **WiFi on/off** is a toggle in Settings → Network. Changing it (then Save) restarts the
 device automatically. With WiFi off, the radio is dead until you hold the button 3 s to
-raise the **setup AP** — join it (QR on screen), configure, save.
+raise the **setup AP**: scan the QR to join, then **open a browser to `192.168.4.1`**
+(shown on the screen; `<name>.local` works too). No captive-portal popup appears — that's
+deliberate, since those mini-browsers can't handle the login prompt — and your phone will
+stay on the network without complaining about internet.
 
 On home WiFi, browse to **`http://stuffy.local`** (or the IP shown on the Diagnostics
 view). Login is user **admin** + your web password. Pages:
