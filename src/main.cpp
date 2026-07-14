@@ -19,6 +19,7 @@
 #include <RTClib.h>
 #include <time.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 
 #include "config.h"
 #include "version.h"
@@ -80,6 +81,10 @@ enum View     { VIEW_CO2, VIEW_TIME, VIEW_DIAG, VIEW_COUNT };
 static AppState gState      = ST_MAIN;
 static uint32_t gStateStart = 0;
 static View     gView       = VIEW_CO2;
+
+// Freeze forensics: which loop section was running when the WDT bit. Survives
+// a wdt/panic/sw reset (NOT power-on), so the boot after a freeze can log it.
+RTC_NOINIT_ATTR static uint32_t gLoopPhase;
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -817,8 +822,13 @@ static void updateLuxAndBrightness() {
   if (millis() - last < 400) return;
   last = millis();
 
-  float lux = veml.readLux();
-  if (lux >= 0) {
+  // NOWAIT is load-bearing, not an optimization: the default readLux() re-reads
+  // the integration-time register over I2C and, on a failed/corrupted read,
+  // computes delay(2 * -1) as unsigned = delay(~49.7 DAYS) — the hard freeze.
+  // We configure IT once at boot and poll at 4x the integration period, so the
+  // wait provides nothing. Sanity-bound the value too (no CRC on this sensor).
+  float lux = veml.readLux(VEML_LUX_NORMAL_NOWAIT);
+  if (lux >= 0 && lux < 130000.0f) {
     ema = (ema < 0) ? lux : (ema * 0.7f + lux * 0.3f);
     gLux = ema;
   }
@@ -890,7 +900,9 @@ void setup() {
   Wire.beginTransmission(I2C_ADDR_MAX17048);
   if (Wire.endTransmission() == 0 && maxlipo.begin(&Wire)) {
     hasBatt = true;
-    Serial.printf("MAX17048: present -> %.2fV  %.0f%%\n", maxlipo.cellVoltage(), maxlipo.cellPercent());
+    // don't print voltage here: the first conversion isn't done this early and
+    // reads 0.00V, which looks like a broken battery path (it isn't)
+    Serial.println(F("MAX17048: present -> battery gauge available"));
   } else {
     Serial.println(F("MAX17048: not found -> no battery gauge"));
   }
@@ -931,6 +943,16 @@ void setup() {
     char boot[48];
     snprintf(boot, sizeof(boot), "boot v%s (%s)", FIRMWARE_VERSION, resetReasonStr());
     datalog::event(bootT, boot);
+    // If a watchdog/panic got us here, record WHERE the loop was wedged —
+    // gLoopPhase survives that kind of reset (it's garbage after power-on).
+    esp_reset_reason_t rr = esp_reset_reason();
+    if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_INT_WDT || rr == ESP_RST_WDT ||
+        rr == ESP_RST_PANIC) {
+      snprintf(boot, sizeof(boot), "freeze recovery: loop phase %lu",
+               (unsigned long)gLoopPhase);
+      datalog::event(bootT, boot);
+    }
+    gLoopPhase = 0;
   }
 
   // Home-WiFi (STA) background server, if enabled + creds present.
@@ -944,10 +966,24 @@ void setup() {
       Serial.println(F("WiFi: home network not reachable"));
     }
   }
+
+  // Arm the hard-freeze safety net LAST (after the blocking WiFi/NTP boot work):
+  // a wedged loop now reboots in LOOP_WDT_TIMEOUT_S with the phase recorded,
+  // instead of hanging until someone opens the enclosure.
+  esp_task_wdt_config_t wdtCfg = {};
+  wdtCfg.timeout_ms    = LOOP_WDT_TIMEOUT_S * 1000;
+  wdtCfg.idle_core_mask = 0;          // watch only tasks we add explicitly
+  wdtCfg.trigger_panic = true;        // panic -> reset -> "watchdog" in the event log
+  if (esp_task_wdt_reconfigure(&wdtCfg) != ESP_OK) esp_task_wdt_init(&wdtCfg);
+  esp_task_wdt_add(NULL);             // NULL = this task (loopTask)
+  Serial.printf("loop WDT armed: %ds\n", LOOP_WDT_TIMEOUT_S);
 }
 
 void loop() {
+  esp_task_wdt_reset();               // feed the freeze safety net
+  gLoopPhase = 1;                     // lux / brightness
   updateLuxAndBrightness();
+  gLoopPhase = 2;                     // button
   BtnEv ev = pollButton();
   uint32_t now = millis();
 
@@ -966,6 +1002,7 @@ void loop() {
   // the AP was torn down right after the request — gated on active flags they
   // survive armed and fire the next time WiFi opens (the "haunted setup" bug).
   // DNS/OTA are gated internally; this is nearly free when WiFi is off.
+  gLoopPhase = 3;                     // portal pump (DNS/OTA/sync worker)
   portal::handle();
   {
     uint32_t epoch;
@@ -987,6 +1024,7 @@ void loop() {
   bool tick = (now - lastTick >= 1000);
   if (tick) {
     lastTick = now;
+    gLoopPhase = 4;                   // SCD-41 I2C read
     bool ready = false;
     if (scd4x.getDataReadyStatus(ready) == 0 && ready) {
       uint16_t co2 = 0; float t = 0, h = 0;
@@ -1005,6 +1043,7 @@ void loop() {
         }
       }
     }
+    gLoopPhase = 5;                   // RTC / gauge / telemetry / trend / log
     refreshTime();
 
     // Mark the reading stale if the SCD-41 has gone quiet (keep the last value
@@ -1072,6 +1111,7 @@ void loop() {
     }
   }
 
+  gLoopPhase = 6;                     // state machine / display rendering
   switch (gState) {
     case ST_MAIN:
       if (ev == BTN_TAP) {

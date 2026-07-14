@@ -89,6 +89,12 @@
 #define SENSOR_STALE_SEC         30    // no good read for this long -> mark stale
 #define SENSOR_FAULT_BOOT_SEC    30    // no first reading by this uptime -> show fault
 
+// Hard-freeze safety net: the task WDT does NOT watch the Arduino loop by
+// default, so a wedged loop hangs forever (sealed enclosure = case open to
+// recover). Watch it; must exceed the longest legitimate loop pass (the sync
+// worker's WiFi connect + NTP is ~20s).
+#define LOOP_WDT_TIMEOUT_S       30
+
 // Auto-brightness (active only when a VEML7700 is detected). Lux maps to a
 // 0..1 position LOGARITHMICALLY (lux spans decades), then to a perceptual
 // brightness between BRIGHT_MIN/MAX, then to PWM duty through a GAMMA curve so
